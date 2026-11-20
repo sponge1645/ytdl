@@ -49,3 +49,18 @@ The weekly workflow checks stable yt-dlp releases on PyPI. For automatic publica
 ## License
 
 YTDL source code is available under the [MIT License](LICENSE). See [Third-party notices](THIRD_PARTY_NOTICES.md) for the engine components.
+
+### Safari extension preview
+
+Build the Universal app with `YTDL_BUILD_SAFARI=1` and the usual
+`YTDL_TOOLS_PUBLIC_KEY` setting. The optional extension build uses full Xcode.
+Open the resulting app once, then enable **YouTube Downloader** in
+**Safari → Settings → Extensions** and grant access to YouTube. For a local
+ad-hoc build, enable **Allow Unsigned Extensions** in the Safari Develop menu
+to test it.
+
+On a YouTube watch page, **Download** beside the Like and Dislike buttons
+opens the app and adds the current video. The app's automatic download
+preference determines whether downloading starts immediately. The extension
+only needs access to YouTube watch pages and sends the current video ID to
+the app.

@@ -110,9 +110,19 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$build_number</string>
   <key>LSMinimumSystemVersion</key><string>$minimum</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array><dict>
+    <key>CFBundleURLName</key><string>com.sponge1645.ytdl.youtube</string>
+    <key>CFBundleURLSchemes</key><array><string>ytdl</string></array>
+  </dict></array>
 </dict></plist>
 PLIST
-codesign --force --deep --sign - "$app"
+if [[ "$variant" == --universal && "${YTDL_BUILD_SAFARI:-0}" == 1 ]]; then
+    bash safari/build/embed.sh "$app" "$staging/safari"
+    codesign --force --sign - "$app"
+else
+    codesign --force --deep --sign - "$app"
+fi
 codesign --verify --deep --strict "$app"
 if [[ -e "$output" ]]; then
     mv "$output" "$staging/previous.app"

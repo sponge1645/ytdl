@@ -1,0 +1,21 @@
+.ytdl-safari-download {
+    flex: none;
+    min-height: 36px;
+    margin-inline: 8px 0;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 18px;
+    background: var(--yt-spec-badge-chip-background, ButtonFace);
+    color: var(--yt-spec-text-primary, ButtonText);
+    font: 500 14px Roboto, Arial, sans-serif;
+    cursor: pointer;
+}
+
+.ytdl-safari-download:hover {
+    background: var(--yt-spec-button-chip-background-hover, ButtonFace);
+}
+
+.ytdl-safari-download:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: -2px;
+}

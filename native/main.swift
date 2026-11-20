@@ -106,6 +106,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     let resources = Bundle.main.resourceURL!
     var downloads: [Download] = []
     var toolsReady = false
+    private var pendingSafariLinks: [String] = []
     private var preferencesPanel: NativePreferences?
     var folder = UserDefaults.standard.url(forKey: "downloadFolder") ??
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
@@ -119,6 +120,26 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         buildWindow()
         UNUserNotificationCenter.current().delegate = self
         prepareTools()
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let links = urls.compactMap { url -> String? in
+            guard url.scheme == "ytdl", url.host == "youtube",
+                  url.user == nil, url.password == nil, url.port == nil,
+                  url.query == nil, url.fragment == nil,
+                  url.path.hasPrefix("/video/") else { return nil }
+            let id = String(url.path.dropFirst("/video/".count))
+            guard id.utf8.count == 11,
+                  id.range(of: #"^[A-Za-z0-9_-]{11}$"#, options: .regularExpression) != nil else { return nil }
+            return "https://www.youtube.com/watch?v=" + id
+        }
+        guard !links.isEmpty else { return }
+        if toolsReady {
+            window.makeKeyAndOrderFront(nil)
+            addLinks(links)
+        } else {
+            pendingSafariLinks.append(contentsOf: links)
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -820,6 +841,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                         self.status.stringValue = message
                         self.appendLog(message)
                     }
+                }
+                if !self.pendingSafariLinks.isEmpty {
+                    let links = self.pendingSafariLinks
+                    self.pendingSafariLinks.removeAll()
+                    self.addLinks(links)
                 }
                 self.checkForAppUpdatesAutomatically()
             }
