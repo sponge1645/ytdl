@@ -1,21 +1,70 @@
 .ytdl-safari-download {
-    flex: none;
-    min-height: 36px;
-    margin-inline: 8px 0;
-    padding: 0 16px;
+    --ytdl-action-background: rgba(0, 0, 0, 0.05);
+    --ytdl-action-hover: rgba(0, 0, 0, 0.1);
+    --ytdl-action-active: rgba(0, 0, 0, 0.15);
+    --ytdl-action-text: #0f0f0f;
+
+    appearance: none;
+    position: relative;
+    flex: 0 0 36px;
+    align-self: center;
+    box-sizing: border-box;
+    width: 36px;
+    height: 36px;
+    margin-inline: 8px 4px;
+    padding: 0;
     border: 0;
-    border-radius: 18px;
-    background: var(--yt-spec-badge-chip-background, ButtonFace);
-    color: var(--yt-spec-text-primary, ButtonText);
-    font: 500 14px Roboto, Arial, sans-serif;
+    border-radius: 50%;
+    background: var(--yt-spec-button-chip-background, var(--ytdl-action-background));
+    color: var(--yt-spec-text-primary, var(--ytdl-action-text));
+    font-size: 0;
     cursor: pointer;
 }
 
+html[dark] .ytdl-safari-download {
+    --ytdl-action-background: rgba(255, 255, 255, 0.1);
+    --ytdl-action-hover: rgba(255, 255, 255, 0.2);
+    --ytdl-action-active: rgba(255, 255, 255, 0.28);
+    --ytdl-action-text: #f1f1f1;
+}
+
 .ytdl-safari-download:hover {
-    background: var(--yt-spec-button-chip-background-hover, ButtonFace);
+    background: var(--yt-spec-button-chip-background-hover, var(--ytdl-action-hover));
+}
+
+.ytdl-safari-download:active {
+    background: var(--ytdl-action-active);
 }
 
 .ytdl-safari-download:focus-visible {
     outline: 2px solid currentColor;
     outline-offset: -2px;
+}
+
+.ytdl-safari-download::before,
+.ytdl-safari-download::after {
+    content: "";
+    position: absolute;
+    box-sizing: border-box;
+    left: 50%;
+    pointer-events: none;
+}
+
+/* The shaft and baseline take their color from the action row. */
+.ytdl-safari-download::before {
+    top: 9px;
+    width: 16px;
+    height: 18px;
+    border-bottom: 2px solid currentColor;
+    background: linear-gradient(currentColor, currentColor) center top / 2px 11px no-repeat;
+    transform: translateX(-50%);
+}
+
+.ytdl-safari-download::after {
+    top: 13px;
+    width: 9px;
+    height: 9px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: translateX(-50%) rotate(45deg);
 }
