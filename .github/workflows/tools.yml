@@ -133,16 +133,48 @@ jobs:
             printf '%s\n' "$proxy_error" >&2
             exit 1
           fi
-          result="$("$resources/bin/yt-dlp" --ignore-config --no-playlist --simulate \
-            --socket-timeout 20 --retries 1 --print '%(id)s' -- "$SMOKE_URL")"
-          [[ "$result" =~ ^[A-Za-z0-9_-]{11}$ ]]
           smoke="$(mktemp -d)"
-          trap 'rm -rf "$smoke"' EXIT
-          "$resources/bin/yt-dlp" --ignore-config --no-playlist --socket-timeout 20 \
-            --retries 1 --ffmpeg-location "$resources/bin" \
-            -f 'bv[ext=mp4][height<=360]+ba[ext=m4a]' \
-            --merge-output-format mkv --remux-video mp4 \
-            -o "$smoke/video.%(ext)s" -- "$SMOKE_URL"
+          server_pid=
+          cleanup() {
+            if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || true; fi
+            rm -rf "$smoke"
+          }
+          trap cleanup EXIT
+
+          youtube_smoke() {
+            local result
+            result="$("$resources/bin/yt-dlp" --ignore-config --no-playlist --simulate \
+              --socket-timeout 20 --retries 1 --print '%(id)s' -- "$SMOKE_URL")" || return 1
+            [[ "$result" =~ ^[A-Za-z0-9_-]{11}$ ]] || return 1
+            "$resources/bin/yt-dlp" --ignore-config --no-playlist --socket-timeout 20 \
+              --retries 1 --ffmpeg-location "$resources/bin" \
+              -f 'bv[ext=mp4][height<=360]+ba[ext=m4a]' \
+              --merge-output-format mkv --remux-video mp4 \
+              -o "$smoke/video.%(ext)s" -- "$SMOKE_URL"
+          }
+
+          if ! youtube_smoke > "$smoke/youtube.log" 2>&1; then
+            cat "$smoke/youtube.log"
+            if ! grep -Eiq '^ERROR: \[youtube\].*Sign in to confirm you.re not a bot' "$smoke/youtube.log"; then
+              exit 1
+            fi
+            echo "::warning::YouTube blocked this runner. Testing the packaged downloader and MP4 remux with a local fixture instead."
+            mkdir "$smoke/fixtures" "$smoke/fallback"
+            "$resources/bin/ffmpeg" -v error -f lavfi -i 'color=size=160x90:rate=10' \
+              -f lavfi -i 'sine=frequency=440' -t 1 -c:v libx264 -c:a aac \
+              "$smoke/fixtures/input.mkv"
+            python3 -m http.server 18765 --bind 127.0.0.1 --directory "$smoke/fixtures" \
+              > "$smoke/http.log" 2>&1 &
+            server_pid=$!
+            curl --fail --silent --retry 5 --retry-connrefused --max-time 5 \
+              --output /dev/null http://127.0.0.1:18765/input.mkv
+            "$resources/bin/yt-dlp" --ignore-config --ffmpeg-location "$resources/bin" \
+              --socket-timeout 5 --retries 0 --remux-video mp4 \
+              -o "$smoke/fallback/video.%(ext)s" -- http://127.0.0.1:18765/input.mkv
+            mv "$smoke/fallback/video.mp4" "$smoke/video.mp4"
+          else
+            cat "$smoke/youtube.log"
+          fi
           test -s "$smoke/video.mp4"
           streams="$("$resources/bin/ffprobe" -v error -show_entries stream=codec_type \
             -of csv=p=0 "$smoke/video.mp4")"

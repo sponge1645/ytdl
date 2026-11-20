@@ -44,7 +44,7 @@ openssl pkey -in tools-private.pem -pubout -out tools-public.pem
 
 Store the private key in the Actions secret `YTDL_TOOLS_SIGNING_KEY` and the public key in the Actions variable `YTDL_TOOLS_PUBLIC_KEY`. Build the app with the matching public key.
 
-The weekly workflow checks stable yt-dlp releases on PyPI. For automatic publication, all usable files for a candidate release must be at least 48 hours old. Both architectures must pass a real YouTube download and an MP4 smoke test before signing and publishing. Other tools use pinned versions. For a manual release, set `publish=true` and supply a public Instagram photo or carousel post via `instagram_url` or `YTDL_INSTAGRAM_SMOKE_URL`. Scheduled runs also test Instagram if the variable is set. Override the YouTube test URL with `smoke_url` or `YTDL_YOUTUBE_SMOKE_URL`.
+The weekly workflow checks stable yt-dlp releases on PyPI. For automatic publication, all usable files for a candidate release must be at least 48 hours old. Both architectures must pass download and MP4 checks before signing and publishing. If YouTube explicitly blocks a runner with its bot verification, the workflow records a warning and checks downloading and remuxing a local media fixture instead. Other YouTube errors fail the run. Other tools use pinned versions. For a manual release, set `publish=true` and supply a public Instagram photo or carousel post via `instagram_url` or `YTDL_INSTAGRAM_SMOKE_URL`. Scheduled runs also test Instagram if the variable is set. Override the YouTube test URL with `smoke_url` or `YTDL_YOUTUBE_SMOKE_URL`.
 
 ## License
 
