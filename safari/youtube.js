@@ -18,12 +18,26 @@
         tooltip.remove();
     }
 
+    function positionTooltip() {
+        if (!tooltip.isConnected || !button.isConnected) return;
+
+        // Measure both elements in the same coordinate space during pinch zoom.
+        const anchor = button.getBoundingClientRect();
+        const bubble = tooltip.getBoundingClientRect();
+        const horizontalDelta = anchor.left + anchor.width / 2 - (bubble.left + bubble.width / 2);
+        const verticalDelta = anchor.bottom + 16 - bubble.top;
+        tooltip.style.left = `${parseFloat(tooltip.style.left) + horizontalDelta}px`;
+        tooltip.style.top = `${parseFloat(tooltip.style.top) + verticalDelta}px`;
+    }
+
     function showTooltip() {
         if (!button.isConnected) return;
-        const bounds = button.getBoundingClientRect();
-        tooltip.style.left = `${bounds.left + bounds.width / 2}px`;
-        tooltip.style.top = `${bounds.bottom + 12}px`;
-        document.body.append(tooltip);
+        if (!tooltip.isConnected) {
+            tooltip.style.left = "0px";
+            tooltip.style.top = "0px";
+            document.body.append(tooltip);
+        }
+        positionTooltip();
     }
 
     button.addEventListener("mouseenter", showTooltip);
@@ -35,8 +49,10 @@
     button.addEventListener("keydown", (event) => {
         if (event.key === "Escape") hideTooltip();
     });
-    window.addEventListener("scroll", hideTooltip, { capture: true, passive: true });
-    window.addEventListener("resize", hideTooltip);
+    window.addEventListener("scroll", positionTooltip, { capture: true, passive: true });
+    window.addEventListener("resize", positionTooltip);
+    window.visualViewport?.addEventListener("scroll", positionTooltip);
+    window.visualViewport?.addEventListener("resize", positionTooltip);
 
     function videoID() {
         if (location.pathname !== "/watch") return null;
@@ -78,6 +94,7 @@
         frame = requestAnimationFrame(() => {
             frame = null;
             placeButton();
+            positionTooltip();
         });
     }
 
