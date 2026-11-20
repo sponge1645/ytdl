@@ -1,0 +1,37 @@
+name: Build Safari preview
+on:
+  push:
+    branches: [safari-download-button]
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Test downloader and extension scripts
+        run: |
+          python3 -m unittest discover -s tests
+          node --check safari/youtube.js
+          bash -n safari/build/embed.sh
+      - name: Build and verify Safari preview
+        env:
+          YTDL_BUILD_SAFARI: "1"
+          YTDL_TOOLS_PUBLIC_KEY: ${{ vars.YTDL_TOOLS_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          bash build-macos.sh --universal
+          app="dist/universal/YouTube Downloader.app"
+          codesign --verify --deep --strict "$app"
+          test -n "$(find "$app/Contents/PlugIns" -name '*.appex' -print -quit)"
+          ditto -c -k --keepParent "$app" YouTube-Downloader-Safari-Preview.zip
+          shasum -a 256 YouTube-Downloader-Safari-Preview.zip > YouTube-Downloader-Safari-Preview.zip.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: YouTube-Downloader-Safari-Preview
+          path: |
+            YouTube-Downloader-Safari-Preview.zip
+            YouTube-Downloader-Safari-Preview.zip.sha256
+          if-no-files-found: error
