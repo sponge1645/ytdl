@@ -93,6 +93,7 @@ jobs:
     needs: resolve
     if: ${{ needs.resolve.outputs.build == 'true' && vars.YTDL_TOOLS_PUBLIC_KEY != '' }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: macos-15-intel

@@ -1,6 +1,7 @@
 import io
 import json
 import shlex
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -52,6 +53,13 @@ class EngineTests(unittest.TestCase):
             (root / "current").write_text("4\n")
             self.assertEqual(tools_update.clean_old_kits("3"), 1)
             self.assertEqual({entry.name for entry in root.iterdir() if entry.is_dir()}, {"2", "3", "4"})
+
+    def test_file_download_retries_connection_reset(self):
+        reset = subprocess.CalledProcessError(56, "curl")
+        with patch.object(dependencies.subprocess, "run", side_effect=[reset, None]) as run, \
+                patch.object(dependencies.time, "sleep"):
+            dependencies.download("https://example.com/tool", Path("test-tool"))
+        self.assertEqual(run.call_count, 2)
 
     def test_download_keeps_https_on_redirects(self):
         with patch.object(dependencies.subprocess, "run") as run:

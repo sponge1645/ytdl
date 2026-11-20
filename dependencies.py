@@ -1,13 +1,13 @@
 """Install missing macOS command-line tools in the current user's directory."""
 
 import hashlib
-import json
 from pathlib import Path
 import platform
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import sys
 from zipfile import ZipFile
 
@@ -16,6 +16,38 @@ BUNDLED = getattr(sys, "frozen", False)
 BIN_DIR = (Path(sys.executable).parent.parent / "bin" if BUNDLED else
            Path.home() / "Library" / "Application Support" / "YTDL" / "bin")
 TOOLS = ("yt-dlp", "ffmpeg", "ffprobe", "deno")
+
+# Release assets and SHA-256 digests from the upstream GitHub releases.
+TOOL_ASSETS = {
+    "arm64": {
+        "ffmpeg": (
+            "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64",
+            "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584",
+        ),
+        "ffprobe": (
+            "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-arm64",
+            "bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3cab091f9cab90b64",
+        ),
+        "deno": (
+            "https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-apple-darwin.zip",
+            "9f0bf660393da2eaff044cdc7444cb08c73f235849b61d224d825a194ce7c98e",
+        ),
+    },
+    "x86_64": {
+        "ffmpeg": (
+            "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64",
+            "ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894",
+        ),
+        "ffprobe": (
+            "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-x64",
+            "fa3add0ce901f7241abe0dfc0155d958fc834aca3f8ce61f87cc712ae669c1e0",
+        ),
+        "deno": (
+            "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-apple-darwin.zip",
+            "4b2f5edd2639b7470f034238b321d7002d8dfb4726d8558f52c17afac370eb2c",
+        ),
+    },
+}
 
 
 YTDLP_ENV = BIN_DIR.parent / "yt-dlp-python"
@@ -69,30 +101,28 @@ def install_python_ytdlp():
 
 
 def download(url, destination):
-    subprocess.run(
-        ["/usr/bin/curl", "--disable", "--fail", "--silent", "--show-error",
-         "--location", "--proto", "=https", "--proto-redir", "=https",
-         "--connect-timeout", "15", "--max-time", "180",
-         "--output", str(destination), url],
-        check=True, capture_output=True, text=True,
-    )
+    arguments = [
+        "/usr/bin/curl", "--disable", "--fail", "--silent", "--show-error",
+        "--location", "--proto", "=https", "--proto-redir", "=https",
+        "--connect-timeout", "15", "--max-time", "180",
+        "--output", str(destination), url,
+    ]
+    for attempt in range(3):
+        try:
+            subprocess.run(arguments, check=True, capture_output=True, text=True)
+            return
+        except subprocess.CalledProcessError as error:
+            if error.returncode not in {6, 7, 18, 28, 35, 52, 55, 56} or attempt == 2:
+                raise
+            time.sleep(attempt + 1)
 
 
 def install_missing(report):
-    architecture = platform.machine()
-    ffmpeg_arch, deno_arch = {
-        "arm64": ("arm64", "aarch64"), "x86_64": ("x64", "x86_64")
-    }[architecture]
-    sources = {
-        "ffmpeg": ("eugeneware/ffmpeg-static", "tags/b6.1.1", f"ffmpeg-darwin-{ffmpeg_arch}"),
-        "ffprobe": ("eugeneware/ffmpeg-static", "tags/b6.1.1", f"ffprobe-darwin-{ffmpeg_arch}"),
-        "deno": ("denoland/deno", "tags/v2.9.8", f"deno-{deno_arch}-apple-darwin.zip"),
-    }
+    sources = TOOL_ASSETS[platform.machine()]
     missing = [tool for tool in TOOLS if not tool_path(tool)]
     if not missing:
         return
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    releases = {}
     with tempfile.TemporaryDirectory(prefix=".install-", dir=BIN_DIR) as directory:
         staging = Path(directory)
         for index, tool in enumerate(missing, 1):
@@ -102,27 +132,15 @@ def install_missing(report):
             if tool == "yt-dlp":
                 install_python_ytdlp()
                 continue
-            repo, release, filename = sources[tool]
-            if (repo, release) not in releases:
-                metadata = staging / "release.json"
-                download(f"https://api.github.com/repos/{repo}/releases/{release}", metadata)
-                releases[repo, release] = json.loads(metadata.read_text(encoding="utf-8"))
-            asset = next((item for item in releases[repo, release]["assets"]
-                          if item["name"] == filename), {})
-            digest = asset.get("digest") or ""
-            url = asset.get("browser_download_url", "")
-            if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest) or not url.startswith(
-                f"https://github.com/{repo}/releases/download/"
-            ):
-                raise ValueError(f"{tool}: GitHub release asset or SHA-256 digest unavailable")
-            downloaded = staging / filename
+            url, digest = sources[tool]
+            downloaded = staging / url.rsplit("/", 1)[-1]
             download(url, downloaded)
             checksum = hashlib.sha256()
             with downloaded.open("rb") as file:
                 for chunk in iter(lambda: file.read(1024 * 1024), b""):
                     checksum.update(chunk)
             actual = checksum.hexdigest()
-            if digest != f"sha256:{actual}":
+            if digest != actual:
                 raise ValueError(f"{tool}: SHA-256 mismatch")
             executable = downloaded
             if tool == "deno":
