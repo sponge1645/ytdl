@@ -6,18 +6,19 @@
 
     appearance: none;
     position: relative;
-    flex: 0 0 36px;
+    flex: 0 0 40px;
     align-self: center;
     box-sizing: border-box;
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
     margin-inline: 8px 4px;
     padding: 0;
     border: 0;
     border-radius: 50%;
     background: var(--yt-spec-button-chip-background, var(--ytdl-action-background));
     color: var(--yt-spec-text-primary, var(--ytdl-action-text));
-    font-size: 0;
+    display: inline-grid;
+    place-items: center;
     cursor: pointer;
 }
 
@@ -41,8 +42,8 @@ html[dark] .ytdl-safari-download {
     outline-offset: -2px;
 }
 
-.ytdl-safari-download::before,
-.ytdl-safari-download::after {
+.ytdl-safari-download-icon::before,
+.ytdl-safari-download-icon::after {
     content: "";
     position: absolute;
     box-sizing: border-box;
@@ -50,9 +51,15 @@ html[dark] .ytdl-safari-download {
     pointer-events: none;
 }
 
+.ytdl-safari-download-icon {
+    position: relative;
+    width: 24px;
+    height: 24px;
+}
+
 /* The shaft and baseline take their color from the action row. */
-.ytdl-safari-download::before {
-    top: 9px;
+.ytdl-safari-download-icon::before {
+    top: 2px;
     width: 16px;
     height: 18px;
     border-bottom: 2px solid currentColor;
@@ -60,11 +67,41 @@ html[dark] .ytdl-safari-download {
     transform: translateX(-50%);
 }
 
-.ytdl-safari-download::after {
-    top: 13px;
+.ytdl-safari-download-icon::after {
+    top: 6px;
     width: 9px;
     height: 9px;
     border-right: 2px solid currentColor;
     border-bottom: 2px solid currentColor;
     transform: translateX(-50%) rotate(45deg);
+}
+
+.ytdl-safari-download::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    z-index: 10;
+    top: calc(100% + 16px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px;
+    border-radius: 4px;
+    background: var(--yt-spec-static-overlay-background-heavy, rgba(0, 0, 0, 0.8));
+    color: #fff;
+    font: 500 12px/18px Roboto, Arial, sans-serif;
+    white-space: nowrap;
+    pointer-events: none;
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 120ms ease, visibility 120ms;
+}
+
+html[dark] .ytdl-safari-download::after {
+    background: #616161;
+}
+
+.ytdl-safari-download:hover::after,
+.ytdl-safari-download:focus-visible::after {
+    visibility: visible;
+    opacity: 1;
+    transition-delay: 350ms;
 }

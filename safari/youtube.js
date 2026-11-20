@@ -2,9 +2,13 @@
     const button = document.createElement("button");
     button.type = "button";
     button.className = "ytdl-safari-download";
-    button.textContent = browser.i18n.getMessage("download");
-    button.title = browser.i18n.getMessage("downloadDescription");
-    button.setAttribute("aria-label", button.title);
+    button.dataset.tooltip = browser.i18n.getMessage("download");
+    button.setAttribute("aria-label", browser.i18n.getMessage("downloadDescription"));
+
+    const icon = document.createElement("span");
+    icon.className = "ytdl-safari-download-icon";
+    icon.setAttribute("aria-hidden", "true");
+    button.append(icon);
 
     function videoID() {
         if (location.pathname !== "/watch") return null;
