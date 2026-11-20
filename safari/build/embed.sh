@@ -25,9 +25,9 @@ xcrun "$packager" "$work/web" --macos-only --swift \
 
 project="$(find "$work/project" -name '*.xcodeproj' -type d -print -quit)"
 test -n "$project"
-xcodebuild -project "$project" -alltargets -configuration Release -sdk macosx \
+xcodebuild -project "$project" -target "YTDL Safari Extension" -configuration Release -sdk macosx \
     CONFIGURATION_BUILD_DIR="$work/products" CODE_SIGNING_ALLOWED=NO \
-    ARCHS="x86_64 arm64" ONLY_ACTIVE_ARCH=NO build
+    ARCHS="x86_64 arm64" ONLY_ACTIVE_ARCH=NO MACOSX_DEPLOYMENT_TARGET=10.15 build
 
 extension="$(find "$work/products" -name '*.appex' -type d -prune -print -quit)"
 test -n "$extension"
