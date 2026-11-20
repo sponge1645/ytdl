@@ -13,22 +13,17 @@
     tooltip.className = "ytdl-safari-tooltip";
     tooltip.textContent = browser.i18n.getMessage("download");
     tooltip.setAttribute("aria-hidden", "true");
-    let tooltipTimer;
 
     function hideTooltip() {
-        clearTimeout(tooltipTimer);
         tooltip.remove();
     }
 
     function showTooltip() {
-        hideTooltip();
-        tooltipTimer = setTimeout(() => {
-            if (!button.isConnected) return;
-            const bounds = button.getBoundingClientRect();
-            tooltip.style.left = `${bounds.left + bounds.width / 2}px`;
-            tooltip.style.top = `${bounds.bottom + 16}px`;
-            document.body.append(tooltip);
-        }, 350);
+        if (!button.isConnected) return;
+        const bounds = button.getBoundingClientRect();
+        tooltip.style.left = `${bounds.left + bounds.width / 2}px`;
+        tooltip.style.top = `${bounds.bottom + 12}px`;
+        document.body.append(tooltip);
     }
 
     button.addEventListener("mouseenter", showTooltip);
