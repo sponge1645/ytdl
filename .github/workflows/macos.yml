@@ -1,0 +1,84 @@
+name: Build macOS app
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the Universal build after verification
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Check downloader protocol
+        run: python3 -m unittest discover -s tests
+      - name: Build and verify Universal app
+        env:
+          YTDL_TOOLS_PUBLIC_KEY: ${{ vars.YTDL_TOOLS_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          YTDL_BUILD_NUMBER="$((GITHUB_RUN_NUMBER + 5))" bash build-macos.sh
+          package="YouTube-Downloader-$version-Universal"
+          ditto -c -k --keepParent "dist/universal/YouTube Downloader.app" "$package.zip"
+          smoke="$(mktemp -d)"
+          trap 'rm -rf "$smoke"' EXIT
+          ditto -x -k "$package.zip" "$smoke"
+          app="$smoke/YouTube Downloader.app"
+          codesign --verify --deep --strict "$app"
+          xcrun lipo "$app/Contents/MacOS/YouTubeDownloader" -verify_arch x86_64 arm64
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$version"
+          test -s "$app/Contents/Resources/AppIcon.icns"
+          test -s "$app/Contents/Resources/tools-update-public.pem"
+          test -s "$app/Contents/Resources/bootstrap-tools.sh"
+          test ! -e "$app/Contents/Resources/engine"
+          test ! -e "$app/Contents/Resources/bin"
+          bash -n "$app/Contents/Resources/bootstrap-tools.sh"
+          shasum -a 256 "$package.zip" > "$package.zip.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: YTDL-Universal
+          path: |
+            YouTube-Downloader-*-Universal.zip
+            YouTube-Downloader-*-Universal.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    permissions:
+      contents: write
+    if: github.ref == 'refs/heads/main' && inputs.publish == true
+    needs: package
+    runs-on: ubuntu-latest
+    concurrency: publish-ytdl-app
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: YTDL-Universal
+          path: release
+      - name: Publish verified Universal archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          : "${GH_TOKEN:?Missing release publishing token}"
+          version="$(cat VERSION)"
+          tag="v$version"
+          cd release
+          zip="YouTube-Downloader-$version-Universal.zip"
+          sha256sum --check "$zip.sha256"
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "YouTube Downloader $version" --notes-file ../RELEASE_NOTES.md
+          gh release upload "$tag" "$zip" "$zip.sha256" --clobber
+          gh release edit "$tag" --title "YouTube Downloader $version" --notes-file ../RELEASE_NOTES.md --draft=false --latest
+          assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
+          grep -Fxq "$zip" <<< "$assets"
+          grep -Fxq "$zip.sha256" <<< "$assets"

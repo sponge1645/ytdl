@@ -1,0 +1,51 @@
+# YouTube Downloader
+
+A native macOS app for downloading YouTube videos and playlists. Paste a link with ⌘V or drop it onto the window. The queue shows video thumbnails and download progress.
+
+## Downloads
+
+- Download individual videos or start the entire queue. Playlist links expand into individual entries, and playlist positions are added to filenames.
+- Save video as QuickTime-compatible MP4. The app uses compatible H.264/AAC streams when available and converts when needed. The selected resolution sets an upper limit.
+- Save audio as MP3 or M4A.
+- Download public Instagram Reels with yt-dlp and public photo posts and carousels with parth-dl. Photo posts and carousels require a direct connection.
+
+## Install on macOS
+
+Download the Universal ZIP from [Releases](https://github.com/sponge1645/ytdl/releases), extract it, and move the app to Applications. The app runs on Intel and Apple Silicon. On first launch it downloads a signed engine kit for the current architecture. The first setup requires an internet connection.
+
+Use **YouTube Downloader → Check for Updates…** to check for a new app release. Automatic checks can be disabled in **Settings → General**. Engine updates are managed separately.
+
+## Build locally
+
+Build the Universal app on macOS with the Xcode Command Line Tools. The example assumes you have the public key for the engine update channel:
+
+```bash
+cd ~/ytdl
+git pull --ff-only
+YTDL_TOOLS_PUBLIC_KEY="$(cat "$HOME/ytdl-signing/public.pem")" bash build-macos.sh --universal
+open "dist/universal/YouTube Downloader.app"
+```
+
+You can also download the `YTDL-Universal` artifact from a successful [macOS workflow run](https://github.com/sponge1645/ytdl/actions/workflows/macos.yml). Building an engine kit locally with `bash build-macos.sh --engine-kit` also requires Python 3.11 or newer and internet access.
+
+## Engine update channel
+
+Signed engine kits are published under the `tools-v1` tag. The app checks the channel at launch, at most once a day after a successful check. It verifies the signed manifest and archive digest, then checks that the installed tools launch. Updates take effect after restarting the app. A failed update leaves the previous kit available. Kits are stored in `~/Library/Application Support/YTDL/tool-kits-v1/`.
+
+Publishing jobs use the built-in GitHub Actions token with `contents: write`. The repository must be public for the app to fetch releases without authentication.
+
+Generate a signing key pair once on a trusted machine:
+
+```bash
+umask 077
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out tools-private.pem
+openssl pkey -in tools-private.pem -pubout -out tools-public.pem
+```
+
+Store the private key in the Actions secret `YTDL_TOOLS_SIGNING_KEY` and the public key in the Actions variable `YTDL_TOOLS_PUBLIC_KEY`. Build the app with the matching public key.
+
+The weekly workflow checks stable yt-dlp releases on PyPI. For automatic publication, all usable files for a candidate release must be at least 48 hours old. Both architectures must pass a real YouTube download and an MP4 smoke test before signing and publishing. Other tools use pinned versions. For a manual release, set `publish=true` and supply a public Instagram photo or carousel post via `instagram_url` or `YTDL_INSTAGRAM_SMOKE_URL`. Scheduled runs also test Instagram if the variable is set. Override the YouTube test URL with `smoke_url` or `YTDL_YOUTUBE_SMOKE_URL`.
+
+## License
+
+YTDL source code is available under the [MIT License](LICENSE). See [Third-party notices](THIRD_PARTY_NOTICES.md) for the engine components.

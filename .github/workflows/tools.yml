@@ -1,0 +1,221 @@
+name: Publish engine kit
+on:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      smoke_url:
+        description: Public short YouTube video to test
+        required: false
+        type: string
+      instagram_url:
+        description: Public Instagram photo or carousel post to test
+        required: false
+        type: string
+      publish:
+        description: Sign and publish the tested engine kits
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency: publish-tools-v1
+
+jobs:
+  resolve:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Find the latest stable yt-dlp release
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          python3 - <<'PY'
+          from datetime import datetime, timedelta, timezone
+          import json
+          import os
+          import re
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.request import urlopen
+
+          def version_key(version):
+              if not re.fullmatch(r"[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(?:\.[0-9]+)?", version):
+                  raise ValueError(f"Unexpected yt-dlp version: {version!r}")
+              return tuple(map(int, version.split(".")))
+
+          with urlopen("https://pypi.org/pypi/yt-dlp/json", timeout=30) as response:
+              release = json.load(response)
+          latest = release["info"]["version"]
+          usable_files = [file for file in release["urls"] if not file.get("yanked", False)]
+          if not usable_files:
+              raise RuntimeError("The latest PyPI release has no usable files")
+
+          script = Path("build-macos.sh").read_text()
+          pinned = re.search(r"yt-dlp\[default\]==([0-9.]+)", script)[1]
+          candidate = max((pinned, latest), key=version_key)
+          try:
+              with urlopen("https://github.com/sponge1645/ytdl/releases/download/tools-v1/yt-dlp-version.txt",
+                           timeout=30) as response:
+                  published = response.read(128).decode("ascii").strip()
+          except HTTPError as error:
+              if error.code != 404:
+                  raise
+              published = None
+
+          if published is not None and version_key(candidate) < version_key(published):
+              raise RuntimeError("Refusing to build an older yt-dlp version than the published kit")
+          scheduled = os.environ["EVENT"] == "schedule"
+          build = not scheduled or published is None or version_key(candidate) > version_key(published)
+          if scheduled and build:
+              if candidate != latest:
+                  raise RuntimeError("Cannot verify upload times for the pinned fallback")
+              cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+              newest_upload = max(
+                  datetime.fromisoformat(file["upload_time_iso_8601"].replace("Z", "+00:00"))
+                  for file in usable_files
+              )
+              if newest_upload > cutoff:
+                  print(f"Deferring yt-dlp {candidate} until its files have aged 48 hours")
+                  build = False
+          print(f"yt-dlp candidate: {candidate}; published baseline: {published}; build: {build}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={candidate}\nbuild={str(build).lower()}\n")
+          PY
+
+  package:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.build == 'true' && vars.YTDL_TOOLS_PUBLIC_KEY != '' }}
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x86_64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - env:
+          YTDL_YTDLP_REQUIREMENT: yt-dlp[default]==${{ needs.resolve.outputs.version }}
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          bash build-macos.sh --engine-kit
+      - name: Test packaged yt-dlp against YouTube
+        env:
+          SMOKE_URL: ${{ inputs.smoke_url || vars.YTDL_YOUTUBE_SMOKE_URL || 'https://www.youtube.com/watch?v=jNQXAC9IVRw' }}
+          INSTAGRAM_URL: ${{ inputs.instagram_url || vars.YTDL_INSTAGRAM_SMOKE_URL }}
+          PUBLISH_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+        run: |
+          set -euo pipefail
+          resources="$PWD/dist/engine-kit/YouTube Downloader.app/Contents/Resources"
+          case "$SMOKE_URL" in
+            https://www.youtube.com/watch\?v=*|https://youtu.be/*) ;;
+            *) exit 1 ;;
+          esac
+          export PATH="$resources/bin:$PATH"
+          if proxy_error="$(printf '%s\n' '--proxy http://127.0.0.1:9' | \
+            "$resources/bin/yt-dlp" --ignore-config --config-locations - --no-playlist \
+              --simulate --socket-timeout 5 --retries 0 --extractor-retries 0 -- "$SMOKE_URL" 2>&1)"; then
+            echo "yt-dlp unexpectedly succeeded with a dead proxy" >&2
+            exit 1
+          fi
+          if ! grep -Eiq "connection refused|errno (61|111)" <<< "$proxy_error"; then
+            printf '%s\n' "$proxy_error" >&2
+            exit 1
+          fi
+          result="$("$resources/bin/yt-dlp" --ignore-config --no-playlist --simulate \
+            --socket-timeout 20 --retries 1 --print '%(id)s' -- "$SMOKE_URL")"
+          [[ "$result" =~ ^[A-Za-z0-9_-]{11}$ ]]
+          smoke="$(mktemp -d)"
+          trap 'rm -rf "$smoke"' EXIT
+          "$resources/bin/yt-dlp" --ignore-config --no-playlist --socket-timeout 20 \
+            --retries 1 --ffmpeg-location "$resources/bin" \
+            -f 'bv[ext=mp4][height<=360]+ba[ext=m4a]' \
+            --merge-output-format mkv --remux-video mp4 \
+            -o "$smoke/video.%(ext)s" -- "$SMOKE_URL"
+          test -s "$smoke/video.mp4"
+          streams="$("$resources/bin/ffprobe" -v error -show_entries stream=codec_type \
+            -of csv=p=0 "$smoke/video.mp4")"
+          grep -Fxq video <<< "$streams"
+          grep -Fxq audio <<< "$streams"
+          if [[ -n "$INSTAGRAM_URL" ]]; then
+            [[ "$INSTAGRAM_URL" == https://www.instagram.com/p/* || "$INSTAGRAM_URL" == https://instagram.com/p/* ]]
+            request="$(python3 -c 'import json, sys; print(json.dumps(dict(url=sys.argv[1], mode="best", folder=sys.argv[2], temporary=sys.argv[3])))' \
+              "$INSTAGRAM_URL" "$smoke/instagram" "$smoke/temp")"
+            "$resources/engine/ytdl-engine" download "$request"
+            test -n "$(find "$smoke/instagram" -type f -size +0c -print -quit)"
+          elif [[ "$PUBLISH_REQUESTED" == true ]]; then
+            echo 'Set YTDL_INSTAGRAM_SMOKE_URL or pass instagram_url to test parth-dl before publishing.' >&2
+            exit 1
+          fi
+      - name: Archive verified engine kit
+        env:
+          ASSET: tools-v1-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          resources="$PWD/dist/engine-kit/YouTube Downloader.app/Contents/Resources"
+          mkdir -p publish "$RUNNER_TEMP/engine-kit"
+          ditto "$resources/engine" "$RUNNER_TEMP/engine-kit/engine"
+          ditto "$resources/bin" "$RUNNER_TEMP/engine-kit/bin"
+          cp "$resources/LICENSE" "$resources/THIRD_PARTY_NOTICES.md" "$RUNNER_TEMP/engine-kit/"
+          ditto -c -k "$RUNNER_TEMP/engine-kit" "publish/$ASSET.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tools-v1-${{ matrix.arch }}
+          path: publish/
+          if-no-files-found: error
+
+  publish:
+    permissions:
+      contents: write
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+    runs-on: ubuntu-latest
+    needs: [resolve, package]
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: tools-v1-*
+          path: publish
+          merge-multiple: true
+      - name: Sign engine manifest
+        env:
+          SIGNING_KEY: ${{ secrets.YTDL_TOOLS_SIGNING_KEY }}
+          PUBLIC_KEY: ${{ vars.YTDL_TOOLS_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SIGNING_KEY"
+          umask 077
+          key="$(mktemp)"
+          public="$(mktemp)"
+          trap 'rm -f "$key" "$public"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key"
+          printf '%s\n' "$PUBLIC_KEY" > "$public"
+          for ASSET in tools-v1-x86_64 tools-v1-arm64; do
+            digest="$(shasum -a 256 "publish/$ASSET.zip" | cut -d ' ' -f 1)"
+            printf '%s %s\n' "$GITHUB_RUN_NUMBER" "$digest" > "publish/$ASSET.manifest"
+            openssl dgst -sha256 -sign "$key" -out "publish/$ASSET.sig" "publish/$ASSET.manifest"
+            openssl dgst -sha256 -verify "$public" -signature "publish/$ASSET.sig" "publish/$ASSET.manifest"
+          done
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          YTDLP_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          : "${GH_TOKEN:?Missing GitHub Actions token}"
+          gh release view tools-v1 >/dev/null 2>&1 ||
+            gh release create tools-v1 --draft --prerelease --target "$GITHUB_SHA" --title "Engine updates v1" --notes "Signed engine kits for YouTube Downloader."
+          gh release upload tools-v1 publish/*.zip publish/*.manifest publish/*.sig --clobber
+          printf '%s\n' "$YTDLP_VERSION" > publish/yt-dlp-version.txt
+          gh release upload tools-v1 publish/yt-dlp-version.txt --clobber
+          gh release edit tools-v1 --draft=false --prerelease

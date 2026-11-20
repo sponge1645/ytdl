@@ -1,0 +1,22 @@
+# Local builds and Python environments
+/dist/
+/build/
+*.spec
+.venv/
+.build-venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local settings and signing material
+.ytdl-settings.json
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+
+# Release artifacts
+/YouTube-Downloader-*.zip
+/YouTube-Downloader-*.zip.sha256

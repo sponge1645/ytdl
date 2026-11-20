@@ -1,0 +1,175 @@
+import Foundation
+
+private enum InterfaceLanguage {
+    static let current: String = {
+        if let preference = NativePreferences.read()["language"] as? String,
+           preference == "ru" || preference == "en" { return preference }
+        let systemLanguage = Locale.preferredLanguages.first?
+            .split(whereSeparator: { $0 == "-" || $0 == "_" }).first?.lowercased()
+        return systemLanguage == "ru" ? "ru" : "en"
+    }()
+    static let russian: [String: String] = [
+        "Preparing download tools…": "Подготовка инструментов…",
+        "Queue": "Очередь",
+        "Completed": "Завершённые",
+        "Paste a link with ⌘V": "Вставь ссылку через ⌘V",
+        "Video": "Видео",
+        "Audio": "Аудио",
+        "Settings…": "Настройки…",
+        "Settings": "Настройки",
+        "Quit YouTube Downloader": "Выйти из YouTube Downloader",
+        "File": "Файл",
+        "Paste Link": "Вставить",
+        "Paste Link (⌘V)": "Вставить ссылку (⌘V)",
+        "Start All": "Скачать всё",
+        "Stop": "Стоп",
+        "LIBRARY": "МЕДИАТЕКА",
+        "Downloads": "Загрузки",
+        "Title": "Название",
+        "Format": "Формат",
+        "Status": "Статус",
+        "Clear Completed": "Очистить завершённые",
+        "Ready · ⌘V to add a link": "Готово · ⌘V, чтобы добавить ссылку",
+        "Copy an HTTP or HTTPS link first.": "Сначала скопируй ссылку HTTP или HTTPS.",
+        "Reading link…": "Читаем ссылку…",
+        "Best available": "Лучшее доступное",
+        "Queued": "В очереди",
+        "Connecting…": "Подключение…",
+        "Downloading": "Загрузка",
+        "Downloading…": "Загрузка…",
+        "Converting video…": "Конвертация видео…",
+        "Merging…": "Объединение дорожек…",
+        "Paused": "Пауза",
+        "Done": "Готово",
+        "Error": "Ошибка",
+        "Media": "Медиа",
+        "Start": "Скачать",
+        "Pause": "Приостановить",
+        "Resume": "Продолжить",
+        "Show in Finder": "Показать в Finder",
+        "More Actions": "Другие действия",
+        "Copy Link": "Скопировать ссылку",
+        "Force Download": "Принудительная загрузка",
+        "Delete": "Удалить",
+        "Clear": "Очистить",
+        "Clear List": "Очистить список",
+        "Open": "Открыть",
+        "Copy": "Копировать",
+        "Engine": "Движок",
+        "Check Tools Now": "Проверить обновления",
+        "Clean Old Kits": "Очистить старые комплекты",
+        "Loading tool versions…": "Читаю версии инструментов…",
+        "Checking for tool updates…": "Проверяю обновления инструментов…",
+        "Cleaning old tool kits…": "Очищаю старые комплекты…",
+        "Old kits removed: %d": "Удалено старых комплектов: %d",
+        "Tools updated. The new versions will be used after restarting the app.": "Инструменты обновлены. Новые версии заработают после перезапуска приложения.",
+        "No newer tools package is available.": "Обновлений инструментов нет.",
+        "Update channel is not configured.": "Канал обновлений не настроен.",
+        "Another tools operation is in progress.": "Другая операция с инструментами уже выполняется.",
+        "Tool operation failed.": "Операция с инструментами завершилась ошибкой.",
+        "Retry in %d s": "Повтор через %d с",
+        "Set Up Download Tools": "Установка инструментов загрузки",
+        "Step %d of %d — %@": "Шаг %d из %d — %@",
+        "The available engine kit predates this app build. Retry after a newer engine kit is published.": "Пакет движка на GitHub устарел. Повтори установку после публикации нового пакета.",
+        "Starting tools…": "Запускаю инструменты…",
+        "Checking installed tools…": "Проверяю установленные инструменты…",
+        "Could not install the download tools.": "Не удалось установить инструменты загрузки.",
+        "Install Tools Again": "Повторить установку",
+        "Checking engine manifest…": "Проверяю манифест инструментов…",
+        "Downloading tools…": "Скачиваю инструменты…",
+        "Verifying tools…": "Проверяю подпись и контрольную сумму…",
+        "Installing tools…": "Устанавливаю инструменты…",
+        "Tools installed.": "Инструменты установлены.",
+        "Tools installation failed. See Log for details.": "Не удалось установить инструменты. Подробности в журнале.",
+        "Window": "Окно",
+        "Edit": "Правка",
+        "Drop a link here or press ⌘V": "Перетащи ссылку сюда или нажми ⌘V",
+        "About YouTube Downloader": "О программе YouTube Downloader",
+        "Show Log": "Показать журнал",
+        "Log": "Журнал",
+        "Download Log": "Журнал загрузок",
+        "You’re up to date.": "У тебя актуальная версия.",
+        "Could not check for app updates.": "Не удалось проверить обновления приложения.",
+        "Version %@ is available.": "Доступна версия %@.",
+        "Open Release": "Открыть релиз",
+        "Check for Updates…": "Проверить обновления…",
+        "Automatically update tools": "Автоматически обновлять инструменты",
+        "Notifications": "Уведомления",
+        "Links added": "Ссылки добавлены",
+        "Download started": "Загрузка началась",
+        "Notify when links are added": "При добавлении ссылок",
+        "Notify when a download starts": "При начале загрузки",
+        "Notify when a download completes": "При завершении загрузки",
+        "Notify when a download fails": "При ошибке загрузки",
+        "Play notification sounds": "Воспроизводить звуки уведомлений",
+        "After all downloads finish": "После завершения очереди",
+        "Do nothing": "Ничего не делать",
+        "Open download folder": "Открыть папку загрузки",
+        "Clear completed entries": "Очистить завершённые записи",
+        "Download completed": "Загрузка завершена",
+        "Download failed": "Ошибка загрузки",
+        "Download engine unavailable": "Движок загрузки недоступен",
+        "No downloads yet": "Здесь появятся загрузки",
+        "Public links from YouTube, Vimeo, TikTok, SoundCloud, Instagram and more": "Публичные ссылки с YouTube, Vimeo, TikTok, SoundCloud, Instagram и других сервисов",
+        "Start new downloads automatically": "Автоматически начинать загрузки",
+        "Number playlist files": "Нумеровать файлы плейлиста",
+        "Signed out": "Без входа",
+        "Auto — MP4 for QuickTime": "Авто — MP4 для QuickTime",
+        "Original streams": "Исходные потоки",
+        "Convert to MP4": "Конвертировать в MP4",
+        "H.264 — standard quality": "H.264 — стандартное качество",
+        "H.264 — high quality": "H.264 — высокое качество",
+        "Choose…": "Выбрать…",
+        "General": "Основные",
+        "Automatically check for app updates": "Автоматически проверять обновления приложения",
+        "Language": "Язык",
+        "System Language": "Системный язык",
+        "Language changes take effect after restarting the app.": "Язык изменится после перезапуска приложения.",
+        "Video folder": "Папка для видео",
+        "Audio folder": "Папка для аудио",
+        "Parallel downloads": "Одновременных загрузок",
+        "Video Output": "Видео",
+        "Output mode": "Режим сохранения",
+        "Original formats": "Исходные форматы",
+        "Conversion preset": "Профиль конвертации",
+        "Network": "Сеть",
+        "Proxy": "Прокси",
+        "Could not move proxy settings to Keychain.": "Не удалось перенести настройки прокси в Связку ключей.",
+        "Proxy unavailable. Update the tools or check Keychain access.": "Прокси недоступен. Обнови инструменты или проверь доступ к Связке ключей.",
+        "Speed limit (KiB/s)": "Лимит скорости (КиБ/с)",
+        "Instagram session": "Сеанс Instagram",
+        "Set the speed limit to 0 for unlimited.": "0 — без ограничения скорости.",
+        "Filenames": "Имена файлов",
+        "Number separator": "Разделитель номера",
+        "Cancel": "Отмена",
+        "Save": "Сохранить",
+        "Choose both download folders.": "Выбери обе папки загрузки.",
+        "Enter a non-negative speed limit.": "Укажи лимит скорости не меньше нуля.",
+        "Invalid proxy URL. Check the host and port and percent-encode credentials.": "Некорректный адрес прокси. Проверь хост и порт и закодируй спецсимволы в логине и пароле.",
+        "Use up to 16 filename-safe characters for the separator.": "Укажи до 16 символов, допустимых в имени файла.",
+        "Select at least one original format.": "Выбери хотя бы один исходный формат.",
+        "Install Python 3.11 or newer from python.org.": "Установи Python 3.11 или новее с python.org."
+    ]
+}
+
+func localized(_ text: String) -> String {
+    let text = ["Waiting", "Waiting for a slot"].contains(text) ? "Queued" : text
+    guard InterfaceLanguage.current == "ru" else { return text }
+    if let translated = InterfaceLanguage.russian[text] { return translated }
+    if let separator = text.range(of: " · "),
+       let translated = InterfaceLanguage.russian[String(text[..<separator.lowerBound])] {
+        return translated + String(text[separator.lowerBound...])
+    }
+    return text
+}
+
+func itemCount(_ count: Int) -> String {
+    if InterfaceLanguage.current == "ru" {
+        let last = count % 10
+        let suffix = (11...14).contains(count % 100) ? "загрузок" :
+            (last == 1 ? "загрузка" : ((2...4).contains(last) ? "загрузки" : "загрузок"))
+        return "\(count) \(suffix)"
+    }
+    return count == 1 ? "1 item" : "\(count) items"
+}
+
