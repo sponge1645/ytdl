@@ -11,7 +11,7 @@
     box-sizing: border-box;
     width: 40px;
     height: 40px;
-    margin-inline: 8px 4px;
+    margin-inline: 8px;
     padding: 0;
     border: 0;
     border-radius: 50%;
@@ -76,32 +76,15 @@ html[dark] .ytdl-safari-download {
     transform: translateX(-50%) rotate(45deg);
 }
 
-.ytdl-safari-download::after {
-    content: attr(data-tooltip);
-    position: absolute;
-    z-index: 10;
-    top: calc(100% + 16px);
-    left: 50%;
+.ytdl-safari-tooltip {
+    position: fixed;
+    z-index: 2147483647;
     transform: translateX(-50%);
     padding: 8px;
     border-radius: 4px;
-    background: var(--yt-spec-static-overlay-background-heavy, rgba(0, 0, 0, 0.8));
+    background: #616161;
     color: #fff;
     font: 500 12px/18px Roboto, Arial, sans-serif;
     white-space: nowrap;
     pointer-events: none;
-    visibility: hidden;
-    opacity: 0;
-    transition: opacity 120ms ease, visibility 120ms;
-}
-
-html[dark] .ytdl-safari-download::after {
-    background: #616161;
-}
-
-.ytdl-safari-download:hover::after,
-.ytdl-safari-download:focus-visible::after {
-    visibility: visible;
-    opacity: 1;
-    transition-delay: 350ms;
 }
