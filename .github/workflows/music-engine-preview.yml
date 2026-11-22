@@ -1,0 +1,36 @@
+name: Build music engine preview
+on:
+  push:
+    branches: [music-engine-preview]
+permissions:
+  contents: read
+jobs:
+  engine:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: mornyeapp/Mornye
+          ref: c4a1c7b812eb135d6e1a295b6b25e11abbd72a7e
+          persist-credentials: false
+      - name: Build the upstream Universal desktop engine
+        run: bash scripts/build_rust_backend.sh desktop
+      - name: Verify architecture and the desktop ABI
+        run: |
+          set -euo pipefail
+          lib=rust_backend/target/desktop/macos/libmornye_desktop.dylib
+          xcrun lipo "$lib" -verify_arch x86_64 arm64
+          codesign --verify --strict "$lib"
+          nm -gU "$lib" > "$RUNNER_TEMP/mornye-symbols.txt"
+          grep -E '[[:space:]]_mornye_init$' "$RUNNER_TEMP/mornye-symbols.txt"
+          grep -E '[[:space:]]_mornye_call$' "$RUNNER_TEMP/mornye-symbols.txt"
+          python3 - "$lib" <<'PY'
+          import ctypes
+          import sys
+
+          engine = ctypes.CDLL(sys.argv[1])
+          for name in ("mornye_init", "mornye_call", "mornye_cancel"):
+              getattr(engine, name)
+          print("The macOS runner loaded the desktop engine.")
+          PY
