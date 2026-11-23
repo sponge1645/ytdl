@@ -359,9 +359,46 @@ def download_attempts(provider, source, audio_format):
         yield from ((service, audio_format) for service in services if service != primary)
 
 
+def log_media_error(stage, result, secret=""):
+    detail = result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, bytes) else (result.stderr or "")
+    if secret:
+        detail = re.sub(re.escape(secret), "[redacted]", detail, flags=re.IGNORECASE)
+    detail = re.sub(r"https?://\S+|\b[0-9a-fA-F]{32,}\b", "[redacted]", detail)
+    detail = " ".join(detail.split())[:600]
+    print(f"{stage}: exit {result.returncode}" + (f" · {detail}" if detail else ""), flush=True)
+
+
+def probe_audio(path):
+    result = subprocess.run([media_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
+                             "-show_entries", "format=format_name:stream=codec_name,profile,channels,sample_rate,bit_rate,bits_per_raw_sample",
+                             "-of", "json", str(path)], capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        log_media_error("FFprobe", result)
+        return {}, {}
+    report = json.loads(result.stdout)
+    return report.get("format", {}), next(iter(report.get("streams", [])), {})
+
+
+def log_audio_file(stage, path, reported_extension=None):
+    try:
+        container, audio = probe_audio(path)
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f"{stage}: audio probe unavailable ({type(error).__name__})", flush=True)
+        return
+    details = [f"file={path.name}", f"container={container.get('format_name', 'unknown')}",
+               f"codec={audio.get('codec_name', 'unknown')}"]
+    if reported_extension:
+        details.append(f"provider extension={reported_extension}")
+    for field in ("profile", "channels", "sample_rate", "bit_rate", "bits_per_raw_sample"):
+        if audio.get(field) not in (None, "N/A"):
+            details.append(f"{field}={audio[field]}")
+    print(f"{stage}: " + " · ".join(details), flush=True)
+
+
 def finalize_dolby(path, descriptor, extension, expected_codec):
     staged = path.parent / ("dolby-final" + extension)
     input_options = []
+    key = ""
     if isinstance(descriptor, dict) and descriptor.get("key"):
         key = re.sub(r"^0x", "", str(descriptor["key"]).strip())
         if descriptor.get("strategy") != "ffmpeg.mov_key" or not re.fullmatch(r"[0-9a-fA-F]{32}", key):
@@ -371,17 +408,16 @@ def finalize_dolby(path, descriptor, extension, expected_codec):
                              *input_options, "-i", str(path), "-map", "0:a:0",
                              "-c:a", "copy", "-f", "mp4", str(staged)], capture_output=True, timeout=120)
     remux_failed = result.returncode != 0
-    probe_path = path if remux_failed else staged
-    result = subprocess.run([media_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
-                             "-show_entries", "stream=codec_name,profile", "-of", "json", str(probe_path)],
-                            capture_output=True, text=True, timeout=30)
-    if result.returncode == 0:
-        streams = json.loads(result.stdout).get("streams", [])
-        if not streams or streams[0].get("codec_name", "").replace("-", "") != expected_codec:
-            raise AudioUnavailable("The source did not return the requested Dolby codec.")
     if remux_failed:
-        raise RuntimeError(f"The service returned a file, but FFmpeg could not save it as {expected_codec.upper()} without re-encoding.")
-    result.check_returncode()
+        log_media_error("FFmpeg Dolby remux", result, key)
+    _, audio = probe_audio(path if remux_failed else staged)
+    codec = audio.get("codec_name", "").replace("-", "")
+    if codec and codec != expected_codec:
+        raise AudioUnavailable(f"The source returned {codec.upper()} instead of {expected_codec.upper()}.")
+    if remux_failed:
+        raise RuntimeError(f"The service returned a file, but FFmpeg could not save it as {expected_codec.upper()} without re-encoding. See Log for details.")
+    if not codec:
+        raise RuntimeError("FFprobe could not verify the saved Dolby stream. See Log for details.")
     return staged
 
 
@@ -407,6 +443,7 @@ def finalize_flac(path, descriptor):
         for command in commands:
             completed = subprocess.run(command, capture_output=True, timeout=120)
             if completed.returncode:
+                log_media_error("FFmpeg FLAC finalization", completed, key)
                 raise RuntimeError("FFmpeg could not finalize or decode the FLAC. The original was kept.")
         if destination == path:
             staged.replace(destination)
@@ -416,17 +453,12 @@ def finalize_flac(path, descriptor):
 
 
 def audio_codec(path):
-    probe = subprocess.run([media_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
-                            "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", str(path)],
-                           capture_output=True, text=True, check=True, timeout=30)
-    return probe.stdout.strip()
+    _, audio = probe_audio(path)
+    return audio.get("codec_name", "")
 
 
 def unwrap_flac(path, label):
-    try:
-        codec = audio_codec(path)
-    except subprocess.CalledProcessError:
-        codec = ""
+    codec = audio_codec(path)
     if codec != "flac":
         raise AudioUnavailable(f"{label} did not provide FLAC (audio codec: {codec or 'unknown'}).")
     destination = path.parent / "lossless.flac"
@@ -472,6 +504,7 @@ def write_metadata(source, destination, track, codec):
     result = subprocess.run(command + mapping + codec + picture + metadata + options + [str(destination)],
                             capture_output=True, timeout=120)
     if result.returncode:
+        log_media_error("FFmpeg metadata and cover", result)
         print("Could not embed the cover; saving the audio and tags.", flush=True)
         subprocess.run(command[:command.index("-i") + 2] + ["-map", "0:a:0"] + codec + metadata
                        + options + [str(destination)], capture_output=True, check=True, timeout=120)
@@ -560,6 +593,7 @@ def download_track(engine, track, provider, service, audio_format, output, desti
     if dolby:
         _, quality, extension, expected_codec = dolby
     print(f"Searching {label} ({audio_format}) for {track['artists']} — {track['name']}", flush=True)
+    print(f"Audio request: source={service} · quality={quality} · extension={extension}", flush=True)
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
     stem = " ".join(stem.split()).strip(". ")
     stem = stem.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(". ") or "Track"
@@ -608,6 +642,7 @@ def download_track(engine, track, provider, service, audio_format, output, desti
     if output not in path.parents or not path.is_file():
         raise RuntimeError(f"The file reported by the engine is unavailable: {path} (format: {actual}).")
     original = path
+    log_audio_file("Received audio", path, actual)
     descriptor = result.get("decryption")
     if dolby:
         try:
@@ -649,10 +684,12 @@ def download_track(engine, track, provider, service, audio_format, output, desti
             except FileExistsError:
                 continue
             break
+        log_audio_file("Saved audio", destination)
         print("YTDL_FILE " + json.dumps(str(destination)))
     else:
         if isinstance(descriptor, dict) and descriptor.get("key") and original != path:
             original.unlink()
+        log_audio_file("Saved audio", path)
         print(f"Saved {audio_format if dolby else 'FLAC'}: {path}")
 
 
@@ -707,5 +744,8 @@ if __name__ == "__main__":
             run(args, home)
     except subprocess.TimeoutExpired:
         parser.exit(1, "FFmpeg finalization timed out. The original was kept.\n")
-    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+    except subprocess.CalledProcessError as error:
+        log_media_error("Media processing", error)
+        parser.exit(1, "Media processing failed. See Log for details.\n")
+    except (OSError, RuntimeError, ValueError) as error:
         parser.exit(1, f"{error}\n")
