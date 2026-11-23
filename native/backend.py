@@ -57,6 +57,15 @@ def proxy_config(command, proxy):
     return f"--proxy {shlex.quote(proxy)}\n"
 
 
+def youtube_cookie_retry(url, preferences, error):
+    browser = preferences.get("youtube_cookie_browser")
+    hosts = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+    if (browser in ("safari", "chrome", "firefox") and urlsplit(url).hostname in hosts
+            and "[youtube]" in error.lower() and "confirm you’re not a bot" in error.lower().replace("'", "’")):
+        return ["--cookies-from-browser", browser]
+    return []
+
+
 def inspect(url):
     if is_artlist(url):
         _, title = resolve_artlist(url, read_preferences()["proxy"])
@@ -74,6 +83,12 @@ def inspect(url):
                "--socket-timeout", "15"]
     config = proxy_config(command, prefs["proxy"])
     result = subprocess.run([*command, "--", url], input=config, capture_output=True, text=True, timeout=90)
+    if result.returncode:
+        cookies = youtube_cookie_retry(url, prefs, result.stderr)
+        if cookies:
+            emit("log", status="YouTube requested sign-in; retrying with the selected browser session.")
+            result = subprocess.run([*command, *cookies, "--", url], input=config,
+                                    capture_output=True, text=True, timeout=90)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Unable to read this link.")
     data = json.loads(result.stdout)
@@ -141,7 +156,8 @@ def download(request):
             raise RuntimeError("Use a direct link to an Instagram post or Reel.")
         if prefs.get("proxy"):
             raise RuntimeError("Instagram photo posts require a direct connection in this app.")
-        download_public_instagram(url, folder, temp)
+        canonical_post = f"https://www.instagram.com/p/{parts[-1]}/"
+        download_public_instagram(canonical_post, folder, temp)
         return
 
     executable = tool_path("yt-dlp")
@@ -163,7 +179,9 @@ def download(request):
         if mode not in AUDIO and prefs["video_output"] == "auto":
             commands.append(download_command(*args, **options, convert=True))
 
-    for attempt, command in enumerate(commands):
+    cookies = []
+    for attempt, base_command in enumerate(commands):
+        command = [*base_command[:-2], *cookies, *base_command[-2:]]
         config = proxy_config(command, prefs['proxy'])
         child = subprocess.Popen(command, stdin=subprocess.PIPE if config is not None else None,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -216,6 +234,12 @@ def download(request):
         code = child.wait()
         if not code and found:
             return
+        if not found and not cookies:
+            cookies = youtube_cookie_retry(url, prefs, "\n".join(errors))
+            if cookies:
+                emit("log", status="YouTube requested sign-in; retrying with the selected browser session.")
+                commands.insert(attempt + 1, base_command)
+                continue
         if attempt + 1 < len(commands) and any("Requested format is not available" in line for line in errors):
             emit("progress", status="Preparing MP4 conversion…")
             continue

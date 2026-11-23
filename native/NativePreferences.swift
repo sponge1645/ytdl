@@ -60,6 +60,8 @@ final class NativePreferences: NSObject {
     private var notificationButtons: [NSButton] = []
     private let parallel = NSPopUpButton()
     private let rate = NSTextField()
+    private let youtubeBrowser = NSPopUpButton()
+    private let youtubeBrowsers = ["", "safari", "chrome", "firefox"]
     private let proxy = NSSecureTextField()
     private let supportsKeychainProxy: Bool
     private var proxyReadFailed = false
@@ -109,6 +111,9 @@ final class NativePreferences: NSObject {
         } else {
             proxy.stringValue = prefs["proxy"] as? String ?? ""
         }
+        youtubeBrowser.addItems(withTitles: [localized("Off"), "Safari", "Chrome", "Firefox"])
+        youtubeBrowser.selectItem(at: youtubeBrowsers.firstIndex(of: prefs["youtube_cookie_browser"] as? String ?? "") ?? 0)
+        youtubeBrowser.toolTip = localized("Use the selected browser session only when YouTube requires sign-in.")
         proxy.placeholderString = "socks5://127.0.0.1:1080"
         output.addItems(withTitles: ["Auto — MP4 for QuickTime", "Original streams", "Convert to MP4"].map(localized))
         output.selectItem(at: outputModes.firstIndex(of: prefs["video_output"] as? String ?? "auto") ?? 0)
@@ -145,6 +150,7 @@ final class NativePreferences: NSObject {
         ])
         addTab("Network", to: tabs, with: [
             row("Proxy", proxy), row("Speed limit (KiB/s)", rate),
+            row("YouTube session", youtubeBrowser),
             NSTextField(labelWithString: localized("Set the speed limit to 0 for unlimited."))
         ])
 
@@ -309,6 +315,7 @@ final class NativePreferences: NSObject {
         }
         prefs["parallel"] = parallel.indexOfSelectedItem + 1
         prefs["rate"] = speed
+        prefs["youtube_cookie_browser"] = youtubeBrowsers[youtubeBrowser.indexOfSelectedItem]
         prefs["video_output"] = mode
         prefs["video_preset"] = preset.indexOfSelectedItem == 1 ? "high" : "standard"
         prefs["native_formats"] = formats

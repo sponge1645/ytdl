@@ -12,6 +12,30 @@ import dependencies
 
 
 class EngineTests(unittest.TestCase):
+    def test_youtube_cookie_retry_is_opt_in_and_scoped(self):
+        error = "ERROR: [youtube] ID: Sign in to confirm you’re not a bot."
+        with patch.object(backend, "tool_path", return_value="yt-dlp"), \
+                patch.object(backend, "read_preferences", return_value={"proxy": "", "youtube_cookie_browser": "safari"}), \
+                patch.object(backend.subprocess, "run") as run, patch("sys.stdout", new_callable=io.StringIO):
+            run.side_effect = [
+                subprocess.CompletedProcess([], 1, stdout="", stderr=error),
+                subprocess.CompletedProcess([], 0, stdout='{"title": "Video"}', stderr=""),
+            ]
+            backend.inspect("https://www.youtube.com/watch?v=0ZHnq7V-GXA")
+        first, second = [call.args[0] for call in run.call_args_list]
+        self.assertNotIn("--cookies-from-browser", first)
+        self.assertEqual(second[-4:-2], ["--cookies-from-browser", "safari"])
+        self.assertEqual(backend.youtube_cookie_retry("https://youtube.com.evil.test", {"youtube_cookie_browser": "safari"}, error), [])
+        self.assertEqual(backend.youtube_cookie_retry("https://youtu.be/example", {}, error), [])
+
+    def test_instagram_profile_post_link_is_normalized(self):
+        with patch.object(backend, "read_preferences", return_value={"proxy": ""}), \
+                patch.object(backend, "download_public_instagram") as download:
+            backend.download({"url": "https://www.instagram.com/wylsacom/p/Df5J7JLRXi1/",
+                              "mode": "best", "folder": "/output", "temporary": "/temporary"})
+        download.assert_called_once_with("https://www.instagram.com/p/Df5J7JLRXi1/",
+                                         Path("/output"), Path("/temporary"))
+
     def test_proxy_config_keeps_credentials_out_of_argv(self):
         proxy = "socks5h://user:p%27ass@host:1080"
         command = ["yt-dlp", "--ignore-config", "--", "https://example.com"]
