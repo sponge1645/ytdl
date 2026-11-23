@@ -1,4 +1,4 @@
-"""Run one Amazon Music FLAC job through the bundled Mornye desktop ABI."""
+"""Run one FLAC job through the bundled Mornye desktop ABI."""
 import argparse
 import base64
 import ctypes
@@ -21,9 +21,19 @@ from uuid import uuid4
 CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_uint64, ctypes.c_int32, ctypes.c_void_p, ctypes.c_size_t)
 EXTENSION_REVISION = "a4c27605dfca6e41aae1efe72db6d22d9ca69bfd"
 PACKAGES = {
+    "tidal-web": "fcd7a0ca4dda3dacd688c6962db218f89dd165d5449c640e71a0b1bf24847cce",
+    "qobuz-web": "c29bdf9f816e5eaab5956552f7236be9b18e89255ce2c39b7681d24f358cde97",
+    "deezer": "86f3efb1068c2cc07fe197de623962e6d35c171669a732c72cb4c6be77cf43d2",
     "amzn": "5177325613ad65b9475aa02e8befb651b68a324d465f04869f2906f5f59044ec",
     "spotify-web": "8ed483f6c451a3af08303b833457de3fa72d8ec8aec1d80bb5f4594c2a303640",
     "apple-music": "851a498c3030def53dc98af03aff772974f1338f1964ffa367c07cce8c73af07",
+}
+
+DOWNLOADERS = {
+    "amazon": ("amzn", "best", "Amazon Music"),
+    "tidal-web": ("tidal-web", "HI_RES_LOSSLESS", "Tidal"),
+    "qobuz-web": ("qobuz-web", "HI_RES_LOSSLESS", "Qobuz"),
+    "deezer": ("deezer", "flac", "Deezer"),
 }
 
 
@@ -78,8 +88,8 @@ class Engine:
         return result
 
 
-def verify(engine):
-    pending = engine.call("getExtensionPendingAuth", {"extension_id": "amazon"})
+def verify(engine, service):
+    pending = engine.call("getExtensionPendingAuth", {"extension_id": service})
     url = pending.get("auth_url", "") if isinstance(pending, dict) else ""
     challenge = urlsplit(url)
     if (challenge.scheme, challenge.netloc, challenge.path) != (
@@ -120,12 +130,23 @@ def install_package(engine, home, name):
 def metadata_provider(url):
     parts = urlsplit(url)
     if parts.scheme != "https":
-        raise ValueError("Paste an HTTPS Spotify or Apple Music track link.")
+        raise ValueError("Paste an HTTPS music track link.")
     if parts.netloc == "open.spotify.com":
         return "spotify-web"
     if parts.netloc == "music.apple.com":
         return "apple-music"
-    raise ValueError("Paste a Spotify or Apple Music track link.")
+    if parts.netloc in {"tidal.com", "www.tidal.com", "listen.tidal.com"}:
+        return "tidal-web"
+    if parts.netloc in {"qobuz.com", "www.qobuz.com", "play.qobuz.com", "open.qobuz.com"}:
+        return "qobuz-web"
+    if parts.netloc in {"deezer.com", "www.deezer.com", "link.deezer.com", "deezer.page.link"}:
+        return "deezer"
+    if parts.netloc in {"music.amazon.com", "music.amazon.co.uk", "music.amazon.de",
+                       "music.amazon.co.jp", "music.amazon.fr", "music.amazon.it",
+                       "music.amazon.es", "music.amazon.in", "music.amazon.com.br",
+                       "music.amazon.com.mx", "music.amazon.com.au", "music.amazon.co"}:
+        return "amzn"
+    raise ValueError("This music catalog is not supported by the preview.")
 
 
 def resolve_track(engine, url):
@@ -194,26 +215,32 @@ def run(args, home):
     })
     engine.call("setDownloadDirectory", {"path": str(output)})
     install_package(engine, home, provider)
-    install_package(engine, home, "amzn")
+    service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
+    package, quality, label = DOWNLOADERS[service]
+    if package != provider:
+        install_package(engine, home, package)
     track = resolve_track(engine, args.url)
-    print(f"Searching Amazon Music for {track['artists']} — {track['name']}", flush=True)
+    print(f"Searching {label} for {track['artists']} — {track['name']}", flush=True)
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
+    stem = " ".join(stem.split()).strip(". ")
+    stem = stem.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(". ") or "Track"
     request = {
-        "contract_version": 1, "service": "amazon", "download_provider": "amazon",
+        "contract_version": 1, "service": service, "download_provider": service,
         "track_name": track["name"], "artist_name": track["artists"],
         "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
         "album_name": track.get("album_name") or "",
-        "output_dir": str(output), "output_path": str(output / "track.flac"),
+        "output_dir": str(output), "output_path": str(output / f"{stem}.flac"),
         "output_ext": ".flac",
-        "quality": "best", "item_id": str(uuid4()), "use_extensions": True,
+        "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
         "use_fallback": False, "embed_metadata": True,
     }
     result = engine.call("downloadByStrategy", json.dumps(request))
     if isinstance(result, dict) and result.get("error_type") == "verification_required":
-        verify(engine)
+        verify(engine, service)
         result = engine.call("downloadByStrategy", json.dumps(request))
     if not isinstance(result, dict) or result.get("success") is not True:
         reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
-        raise RuntimeError(f"Amazon Music did not complete the test download ({reason}).")
+        raise RuntimeError(f"{label} did not complete the test download ({reason}).")
     reported = result.get("file_path")
     actual = result.get("actual_extension") or "unknown"
     if not isinstance(reported, str) or not reported:
@@ -236,14 +263,15 @@ def run(args, home):
             audio.seek(10 + size + (10 if header[3] == 4 and header[5] & 16 else 0))
             header = audio.read(4)
     if not header.startswith(b"fLaC"):
-        raise RuntimeError(f"Amazon returned a file without a FLAC header (format: {actual}): {path}")
+        raise RuntimeError(f"{label} returned a file without a FLAC header (format: {actual}): {path}")
     print(f"Saved FLAC: {path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path)
-    parser.add_argument("url", help="Spotify or Apple Music single-track link")
+    parser.add_argument("url", help="Single-track music link")
+    parser.add_argument("--source", choices=DOWNLOADERS, help="Override the audio source")
     parser.add_argument("output", type=Path, help="New directory for the test download")
     args = parser.parse_args()
     if args.output.exists():
