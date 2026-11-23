@@ -1,4 +1,4 @@
-# YouTube Downloader
+# Media Downloader
 
 A native macOS app for downloading video and music. Paste a link with ⌘V or drop it onto the window. The queue shows video thumbnails and download progress.
 
@@ -14,7 +14,7 @@ A native macOS app for downloading video and music. Paste a link with ⌘V or dr
 
 Download the Universal ZIP from [Releases](https://github.com/sponge1645/ytdl/releases), extract it, and move the app to Applications. The app runs on Intel and Apple Silicon. On first launch it downloads a signed engine kit for the current architecture. The first setup requires an internet connection.
 
-Use **YouTube Downloader → Check for Updates…** to check for a new app release. Automatic checks can be disabled in **Settings → General**. Engine updates are managed separately.
+Use **Media Downloader → Check for Updates…** to check for a new app release. Automatic checks can be disabled in **Settings → General**. Engine updates are managed separately.
 
 ## Build locally
 
@@ -24,7 +24,7 @@ Build the full Universal app on macOS with Xcode and Rust installed through rust
 cd ~/ytdl
 git pull --ff-only
 YTDL_BUILD_SAFARI=1 YTDL_TOOLS_PUBLIC_KEY="$(cat "$HOME/ytdl-signing/public.pem")" bash build-music.sh
-open "dist/universal/YouTube Downloader.app"
+open "dist/universal/Media Downloader.app"
 ```
 
 The full build requires macOS 11 or newer and uses Python 3 for music downloads. The macOS build workflow starts on manual dispatch. You can download the `YTDL-Universal` artifact from a successful [macOS workflow run](https://github.com/sponge1645/ytdl/actions/workflows/macos.yml). Building an engine kit locally with `bash build-macos.sh --engine-kit` also requires Python 3.11 or newer and internet access.
@@ -54,7 +54,7 @@ YTDL source code is available under the [MIT License](LICENSE). See [Third-party
 ## Safari extension
 
 The full Universal build includes the Safari extension.
-Open the resulting app once, then enable **YouTube Downloader** in
+Open the resulting app once, then enable **Media Downloader** in
 **Safari → Settings → Extensions** and grant access to YouTube. For a local
 ad-hoc build, enable **Allow Unsigned Extensions** in the Safari Develop menu
 to test it.

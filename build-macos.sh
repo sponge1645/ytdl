@@ -16,12 +16,12 @@ if [[ "$arch" == arm64 ]]; then minimum=11.0; fi
 variant="${1:---universal}"
 case "$variant" in
     --engine-kit)
-        output="$PWD/dist/engine-kit/YouTube Downloader.app"
+        output="$PWD/dist/engine-kit/Media Downloader.app"
         ;;
     --universal)
         : "${YTDL_TOOLS_PUBLIC_KEY:?Set YTDL_TOOLS_PUBLIC_KEY to build the Universal app}"
         minimum=10.15
-        output="$PWD/dist/universal/YouTube Downloader.app"
+        output="$PWD/dist/universal/Media Downloader.app"
         if [[ -n "${YTDL_MUSIC_ENGINE_LIBRARY:-}" ]]; then
             minimum=11.0
         fi
@@ -31,7 +31,7 @@ esac
 mkdir -p "$(dirname "$output")"
 staging="$(mktemp -d "$PWD/dist/.native-build.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
-app="$staging/YouTube Downloader.app"
+app="$staging/Media Downloader.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 compile_app() {
     xcrun --sdk macosx swiftc -O -target "$1" \
@@ -105,8 +105,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
   <key>CFBundleExecutable</key><string>YouTubeDownloader</string>
   <key>CFBundleIdentifier</key><string>com.sponge1645.ytdl.native</string>
-  <key>CFBundleName</key><string>YouTube Downloader</string>
-  <key>CFBundleDisplayName</key><string>YouTube Downloader</string>
+  <key>CFBundleName</key><string>Media Downloader</string>
+  <key>CFBundleDisplayName</key><string>Media Downloader</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleIconFile</key><string>AppIcon.icns</string>
@@ -129,7 +129,7 @@ if [[ -n "${YTDL_MUSIC_ENGINE_LIBRARY:-}" && "$variant" == --universal ]]; then
         cp "$YTDL_MUSIC_ENGINE_SOURCE/"{LICENSE,COPYING,NOTICE} "$notice_dir/"
     fi
     cat > "$notice_dir/Source.txt" <<'NOTICE'
-YouTube Downloader uses the separately loaded Mornye desktop engine (LGPL).
+Media Downloader uses the separately loaded Mornye desktop engine (LGPL).
 Source and build instructions:
 https://github.com/mornyeapp/Mornye/tree/c4a1c7b812eb135d6e1a295b6b25e11abbd72a7e
 NOTICE

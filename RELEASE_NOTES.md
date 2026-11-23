@@ -1,4 +1,4 @@
-# YouTube Downloader 1.1
+# Media Downloader 1.1
 
 - Download individual tracks and expand music albums and playlists into the download queue. The selected source and track determine which audio formats are available.
 - Save music with tags and embedded cover artwork when available. Reinstall Spotify and Apple Music extensions from Settings, and paste a verification return link into the app if Safari does not return automatically.

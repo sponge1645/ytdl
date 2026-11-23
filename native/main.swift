@@ -270,14 +270,14 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private func buildMenus() {
         let bar = NSMenu()
         let application = NSMenuItem()
-        application.submenu = NSMenu()
-        application.submenu?.addItem(withTitle: localized("About YouTube Downloader"),
+        application.submenu = NSMenu(title: "Media Downloader")
+        application.submenu?.addItem(withTitle: localized("About Media Downloader"),
                                      action: #selector(showAbout), keyEquivalent: "").target = self
         application.submenu?.addItem(.separator())
         application.submenu?.addItem(withTitle: localized("Settings…"), action: #selector(settings), keyEquivalent: ",").target = self
         application.submenu?.addItem(withTitle: localized("Check for Updates…"), action: #selector(checkForUpdates), keyEquivalent: "").target = self
         application.submenu?.addItem(.separator())
-        application.submenu?.addItem(withTitle: localized("Quit YouTube Downloader"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        application.submenu?.addItem(withTitle: localized("Quit Media Downloader"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem()
         file.submenu = NSMenu(title: localized("File"))
         file.submenu?.addItem(withTitle: localized("Paste Link"), action: #selector(pasteLink), keyEquivalent: "v").target = self
@@ -411,7 +411,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     private func buildWindow() {
-        window.title = "YouTube Downloader"
+        window.title = "Media Downloader"
         window.minSize = NSSize(width: 720, height: 400)
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
@@ -422,7 +422,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let header = NSVisualEffectView()
         header.material = .titlebar
         header.blendingMode = .withinWindow
-        let appName = NSTextField(labelWithString: "YouTube Downloader")
+        let appName = NSTextField(labelWithString: "Media Downloader")
         appName.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         appName.font = .systemFont(ofSize: 15, weight: .semibold)
         appName.lineBreakMode = .byTruncatingTail

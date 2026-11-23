@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
-  "name": "YouTube Downloader",
-  "description": "Adds a download button to YouTube that opens YouTube Downloader.",
+  "name": "Media Downloader",
+  "description": "Adds a download button to YouTube that opens Media Downloader.",
   "version": "1.0",
   "default_locale": "en",
   "content_scripts": [{

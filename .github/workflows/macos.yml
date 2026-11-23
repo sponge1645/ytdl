@@ -32,11 +32,11 @@ jobs:
           version="$(cat VERSION)"
           YTDL_BUILD_NUMBER="$((GITHUB_RUN_NUMBER + 5))" bash build-music.sh
           package="YouTube-Downloader-$version-Universal"
-          ditto -c -k --keepParent "dist/universal/YouTube Downloader.app" "$package.zip"
+          ditto -c -k --keepParent "dist/universal/Media Downloader.app" "$package.zip"
           smoke="$(mktemp -d)"
           trap 'rm -rf "$smoke"' EXIT
           ditto -x -k "$package.zip" "$smoke"
-          app="$smoke/YouTube Downloader.app"
+          app="$smoke/Media Downloader.app"
           codesign --verify --deep --strict "$app"
           xcrun lipo "$app/Contents/MacOS/YouTubeDownloader" -verify_arch x86_64 arm64
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$version"
@@ -88,9 +88,9 @@ jobs:
           zip="YouTube-Downloader-$version-Universal.zip"
           sha256sum --check "$zip.sha256"
           gh release view "$tag" >/dev/null 2>&1 ||
-            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "YouTube Downloader $version" --notes-file ../RELEASE_NOTES.md
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Media Downloader $version" --notes-file ../RELEASE_NOTES.md
           gh release upload "$tag" "$zip" "$zip.sha256" --clobber
-          gh release edit "$tag" --title "YouTube Downloader $version" --notes-file ../RELEASE_NOTES.md --draft=false --latest
+          gh release edit "$tag" --title "Media Downloader $version" --notes-file ../RELEASE_NOTES.md --draft=false --latest
           assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
           grep -Fxq "$zip" <<< "$assets"
           grep -Fxq "$zip.sha256" <<< "$assets"

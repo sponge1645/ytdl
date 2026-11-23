@@ -118,7 +118,7 @@ jobs:
           PUBLISH_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
         run: |
           set -euo pipefail
-          resources="$PWD/dist/engine-kit/YouTube Downloader.app/Contents/Resources"
+          resources="$PWD/dist/engine-kit/Media Downloader.app/Contents/Resources"
           case "$SMOKE_URL" in
             https://www.youtube.com/watch\?v=*|https://youtu.be/*) ;;
             *) exit 1 ;;
@@ -196,7 +196,7 @@ jobs:
           ASSET: tools-v1-${{ matrix.arch }}
         run: |
           set -euo pipefail
-          resources="$PWD/dist/engine-kit/YouTube Downloader.app/Contents/Resources"
+          resources="$PWD/dist/engine-kit/Media Downloader.app/Contents/Resources"
           mkdir -p publish "$RUNNER_TEMP/engine-kit"
           ditto "$resources/engine" "$RUNNER_TEMP/engine-kit/engine"
           ditto "$resources/bin" "$RUNNER_TEMP/engine-kit/bin"
@@ -247,7 +247,7 @@ jobs:
           set -euo pipefail
           : "${GH_TOKEN:?Missing GitHub Actions token}"
           gh release view tools-v1 >/dev/null 2>&1 ||
-            gh release create tools-v1 --draft --prerelease --target "$GITHUB_SHA" --title "Engine updates v1" --notes "Signed engine kits for YouTube Downloader."
+            gh release create tools-v1 --draft --prerelease --target "$GITHUB_SHA" --title "Engine updates v1" --notes "Signed engine kits for Media Downloader."
           gh release upload tools-v1 publish/*.zip publish/*.manifest publish/*.sig --clobber
           printf '%s\n' "$YTDLP_VERSION" > publish/yt-dlp-version.txt
           gh release upload tools-v1 publish/yt-dlp-version.txt --clobber

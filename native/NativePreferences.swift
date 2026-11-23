@@ -291,7 +291,7 @@ final class NativePreferences: NSObject {
     static func showSafariAccessInstructions() {
         let alert = NSAlert()
         alert.messageText = localized("Allow Safari cookie access")
-        alert.informativeText = localized("If access is not already enabled, add YouTube Downloader to Full Disk Access, then quit and reopen the app.")
+        alert.informativeText = localized("If access is not already enabled, add Media Downloader to Full Disk Access, then quit and reopen the app.")
         alert.addButton(withTitle: localized("Open System Settings"))
         alert.addButton(withTitle: localized("Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn,
