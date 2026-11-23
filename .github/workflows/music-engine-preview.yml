@@ -15,15 +15,17 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          path: upstream
           repository: mornyeapp/Mornye
           ref: c4a1c7b812eb135d6e1a295b6b25e11abbd72a7e
           persist-credentials: false
       - name: Build the upstream Universal desktop engine
+        working-directory: upstream
         run: bash scripts/build_rust_backend.sh desktop
       - name: Verify architecture and the desktop ABI
         run: |
           set -euo pipefail
-          lib=rust_backend/target/desktop/macos/libmornye_desktop.dylib
+          lib=upstream/rust_backend/target/desktop/macos/libmornye_desktop.dylib
           xcrun lipo "$lib" -verify_arch x86_64 arm64
           codesign --verify --strict "$lib"
           nm -gU "$lib" > "$RUNNER_TEMP/mornye-symbols.txt"
@@ -43,7 +45,8 @@ jobs:
           YTDL_TOOLS_PUBLIC_KEY: ${{ vars.YTDL_TOOLS_PUBLIC_KEY }}
         run: |
           set -euo pipefail
-          export YTDL_MUSIC_ENGINE_LIBRARY="$PWD/rust_backend/target/desktop/macos/libmornye_desktop.dylib"
+          export YTDL_MUSIC_ENGINE_LIBRARY="$PWD/upstream/rust_backend/target/desktop/macos/libmornye_desktop.dylib"
+          python3 preview/music-track-smoke.py --help
           bash preview/build-music-preview.sh
           app="preview/dist/music-preview/YouTube Downloader.app"
           codesign --verify --deep --strict "$app"
