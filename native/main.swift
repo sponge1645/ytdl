@@ -103,6 +103,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     let empty = EmptyQueueView()
     let mode = NSSegmentedControl(labels: [localized("Video"), localized("Audio")], trackingMode: .selectOne, target: nil, action: nil)
     let quality = NSPopUpButton()
+    private var qualityWidth: NSLayoutConstraint?
+    private var sharedAudioFormat: String?
     let musicSource = NSPopUpButton()
     private weak var musicSelection: Download?
     private var previousMode = 0
@@ -366,7 +368,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         changeMode()
         let qualityDivider = separator(vertical: true)
         qualityDivider.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        quality.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        let width = quality.widthAnchor.constraint(equalToConstant: 160)
+        width.isActive = true
+        qualityWidth = width
         musicSource.addItems(withTitles: [localized("Automatic"), "Amazon Music", "Tidal", "Qobuz", "Deezer"])
         musicSource.toolTip = localized("Audio source")
         musicSource.target = self
@@ -1160,6 +1164,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
         musicSelection = item
         musicSource.isHidden = item == nil
+        qualityWidth?.constant = item == nil ? 160 : 228
         mode.isEnabled = item == nil
         quality.isEnabled = item?.startedMode == nil
         musicSource.isEnabled = item?.startedMode == nil
@@ -1167,10 +1172,12 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             mode.selectedSegment = 1
             musicSource.selectItem(at: item.musicSource)
         } else {
-            mode.selectedSegment = previousMode
+            mode.selectedSegment = sharedAudioFormat == nil ? previousMode : 1
         }
+        let shared = sharedAudioFormat
         changeMode()
-        if item == nil, let index = formatChoices.firstIndex(of: previousFormat) {
+        sharedAudioFormat = shared
+        if item == nil, let index = formatChoices.firstIndex(of: shared ?? previousFormat) {
             quality.selectItem(at: index)
             refresh()
         }
@@ -1179,16 +1186,54 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc private func changeMusicSource() {
         if let item = musicSelection, item.startedMode == nil {
             item.musicSource = musicSource.indexOfSelectedItem
+            if !formatChoices.contains(item.musicFormat) { item.musicFormat = "FLAC" }
+            changeMode()
         }
     }
 
+    private func effectiveSource(for item: Download) -> String {
+        let index = item.musicSource
+        if musicSources.indices.contains(index), index > 0 { return musicSources[index] }
+        guard let host = URL(string: item.url)?.host else { return "amazon" }
+        if host == "tidal.com" || host.hasSuffix(".tidal.com") { return "tidal-web" }
+        if host == "qobuz.com" || host.hasSuffix(".qobuz.com") { return "qobuz-web" }
+        if host == "deezer.com" || host.hasSuffix(".deezer.com") || host == "deezer.page.link" { return "deezer" }
+        return "amazon"
+    }
+
     private var formatChoices: [String] {
-        if musicSelection != nil { return ["FLAC", "M4A", "MP3"] }
+        if let item = musicSelection {
+            var choices = ["FLAC"]
+            let source = effectiveSource(for: item)
+            if source == "tidal-web" || source == "qobuz-web" { choices.append("FLAC-CD") }
+            choices.append("M4A")
+            if source == "tidal-web" { choices.append("M4A-ATMOS") }
+            if source == "amazon" { choices += ["M4A-DDP", "MP4-ATMOS"] }
+            choices.append("MP3")
+            return choices
+        }
         return mode.selectedSegment == 1 ? ["MP3", "M4A"] : ["best", "2160p", "1080p", "720p", "480p"]
     }
 
     private var regularFormat: String {
-        musicSelection == nil ? selectedFormat : previousFormat
+        if let shared = sharedAudioFormat, downloads.contains(where: { $0.music && !$0.done }) {
+            return shared
+        }
+        return musicSelection == nil ? selectedFormat : previousFormat
+    }
+
+    private func formatLabel(_ format: String) -> String {
+        guard let item = musicSelection else { return format == "best" ? localized("Best available") : format }
+        switch format {
+        case "FLAC": return effectiveSource(for: item) == "deezer" ? "FLAC (Lossless)" : "FLAC (Hi-Res)"
+        case "FLAC-CD": return "FLAC (Lossless)"
+        case "M4A": return "M4A (AAC)"
+        case "M4A-DDP": return "M4A (Dolby Digital Plus)"
+        case "M4A-ATMOS": return "M4A (Dolby Atmos)"
+        case "MP4-ATMOS": return "MP4 (Dolby Atmos)"
+        case "MP3": return "MP3 (320 kbit/s)"
+        default: return format
+        }
     }
 
     private var selectedFormat: String {
@@ -1198,16 +1243,28 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func changeMode() {
+        if musicSelection == nil { sharedAudioFormat = nil }
         quality.removeAllItems()
-        quality.addItems(withTitles: formatChoices.map {
-            $0 == "best" ? localized("Best available") : $0
-        })
+        quality.addItems(withTitles: formatChoices.map { formatLabel($0) })
         quality.selectItem(at: formatChoices.firstIndex(of: musicSelection?.musicFormat ?? "") ?? 0)
         refresh()
     }
 
     @objc private func changeQuality() {
-        if let item = musicSelection, item.startedMode == nil { item.musicFormat = selectedFormat }
+        if let item = musicSelection, item.startedMode == nil {
+            item.musicFormat = selectedFormat
+            if selectedFormat == "MP3" || selectedFormat.hasPrefix("M4A") {
+                let shared = selectedFormat == "MP3" ? "MP3" : "M4A"
+                sharedAudioFormat = shared
+                for pending in downloads where pending.music && !pending.done && pending.startedMode == nil && pending !== item {
+                    pending.musicFormat = shared
+                }
+            } else {
+                sharedAudioFormat = nil
+            }
+        } else if musicSelection == nil {
+            sharedAudioFormat = nil
+        }
         refresh()
     }
 
@@ -1430,9 +1487,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.scheduled = false
         item.status = "Connecting…"
         item.lastError = ""
-        let source = musicSources[item.musicSource]
+        let source = effectiveSource(for: item)
         item.process = musicPreview.run(link: item.url, folder: outputFolder(for: "audio_folder"),
-                                        source: source.isEmpty ? nil : source, format: format,
+                                        source: source, format: format,
                                         status: { [weak self, weak item] message in
             guard let self = self, let item = item, item.status != "Paused" else { return }
             self.status.stringValue = message
@@ -1716,7 +1773,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         case "format":
             let selectedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
             let format = item.files.last?.pathExtension.uppercased() ??
-                (item.url.contains("instagram.com/") ? "Media" : (item.music || ["MP3", "M4A"].contains(selectedMode) ? selectedMode : "MP4"))
+                (item.url.contains("instagram.com/") ? "Media" : (item.music ? String(selectedMode.prefix(while: { $0 != "-" })) :
+                    (["MP3", "M4A"].contains(selectedMode) ? selectedMode : "MP4")))
             let badge = NSTextField(labelWithString: localized(format))
             badge.font = .systemFont(ofSize: 11, weight: .medium)
             badge.alignment = .center

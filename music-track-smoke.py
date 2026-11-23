@@ -170,18 +170,47 @@ def resolve_track(engine, url):
     return track
 
 
-def ffmpeg_path():
+def media_tool(name):
     root = Path.home() / "Library/Application Support/YTDL/tool-kits-v1"
     current = root / "current"
     version = current.read_text().strip() if current.is_file() else ""
     if version.isascii() and version.isdecimal():
-        bundled = root / version / "bin/ffmpeg"
+        bundled = root / version / "bin" / name
         if bundled.is_file():
             return str(bundled)
-    executable = shutil.which("ffmpeg")
+    executable = shutil.which(name)
     if executable:
         return executable
-    raise RuntimeError("FFmpeg is missing. Open YTDL to install the tools or put FFmpeg on PATH.")
+    raise RuntimeError(f"{name} is missing. Open YTDL to install the download tools.")
+
+
+DOLBY_FORMATS = {
+    "M4A-DDP": ("amazon", "eac3", ".m4a", "eac3"),
+    "M4A-ATMOS": ("tidal-web", "DOLBY_ATMOS", ".m4a", "eac3"),
+    "MP4-ATMOS": ("amazon", "ac4", ".mp4", "ac4"),
+}
+
+
+def finalize_dolby(path, descriptor, extension, expected_codec):
+    staged = path.parent / ("dolby-final" + extension)
+    input_options = []
+    if isinstance(descriptor, dict) and descriptor.get("key"):
+        key = re.sub(r"^0x", "", str(descriptor["key"]).strip())
+        if descriptor.get("strategy") != "ffmpeg.mov_key" or not re.fullmatch(r"[0-9a-fA-F]{32}", key):
+            raise RuntimeError("The source returned an unsupported Dolby finalization request.")
+        input_options = ["-decryption_key", key]
+    result = subprocess.run([media_tool("ffmpeg"), "-nostdin", "-v", "error", "-xerror",
+                             *input_options, "-i", str(path), "-map", "0:a:0",
+                             "-c:a", "copy", "-f", "mp4", str(staged)], capture_output=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg could not save the {expected_codec.upper()} track without re-encoding.")
+    result = subprocess.run([media_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
+                             "-show_entries", "stream=codec_name,profile", "-of", "json", str(staged)],
+                            capture_output=True, text=True, timeout=30, check=True)
+    streams = json.loads(result.stdout).get("streams", [])
+    if not streams or streams[0].get("codec_name", "").replace("-", "") != expected_codec:
+        raise RuntimeError("The source did not return the requested Dolby codec.")
+    return staged
 
 
 def finalize_flac(path, descriptor):
@@ -193,7 +222,7 @@ def finalize_flac(path, descriptor):
     key = re.sub(r"^0x", "", key.strip())
     if not re.fullmatch(r"[0-9a-fA-F]{32}", key):
         raise RuntimeError("Amazon did not return a usable finalization key.")
-    ffmpeg = ffmpeg_path()
+    ffmpeg = media_tool("ffmpeg")
     destination = path.with_suffix(".flac")
     with tempfile.TemporaryDirectory(prefix=".ytdl-finalize-", dir=path.parent) as work:
         staged = Path(work) / "audio.flac"
@@ -238,6 +267,16 @@ def run(args, home, master_key):
     engine.call("setDownloadDirectory", {"path": str(output)})
     service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
     package, quality, label = DOWNLOADERS[service]
+    dolby = DOLBY_FORMATS.get(args.format)
+    extension = ".flac"
+    if args.format == "FLAC-CD":
+        if service not in {"tidal-web", "qobuz-web"}:
+            raise RuntimeError("This source does not offer a separate CD-quality request.")
+        quality = "LOSSLESS"
+    if dolby:
+        required_source, quality, extension, expected_codec = dolby
+        if service != required_source:
+            raise RuntimeError("The selected Dolby format is unavailable from this source.")
     if package != provider:
         install_package(engine, home, package)
     print(f"Searching {label} for {track['artists']} — {track['name']}", flush=True)
@@ -249,8 +288,8 @@ def run(args, home, master_key):
         "track_name": track["name"], "artist_name": track["artists"],
         "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
         "album_name": track.get("album_name") or "", "cover_url": cover,
-        "output_dir": str(output), "output_path": str(output / f"{stem}.flac"),
-        "output_ext": ".flac",
+        "output_dir": str(output), "output_path": str(output / f"{stem}{extension}"),
+        "output_ext": extension,
         "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
         "use_fallback": False, "embed_metadata": True,
     }
@@ -273,25 +312,28 @@ def run(args, home, master_key):
         raise RuntimeError(f"The file reported by the engine is unavailable: {path} (format: {actual}).")
     original = path
     descriptor = result.get("decryption")
-    if isinstance(descriptor, dict) and descriptor.get("key"):
-        path = finalize_flac(path, descriptor)
-    with path.open("rb") as audio:
-        header = audio.read(10)
-        if header.startswith(b"ID3") and len(header) == 10 and all(n < 128 for n in header[6:10]):
-            size = 0
-            for byte in header[6:10]:
-                size = (size << 7) | byte
-            audio.seek(10 + size + (10 if header[3] == 4 and header[5] & 16 else 0))
-            header = audio.read(4)
-    if not header.startswith(b"fLaC"):
-        raise RuntimeError(f"{label} returned a file without a FLAC header (format: {actual}): {path}")
+    if dolby:
+        path = finalize_dolby(path, descriptor, extension, expected_codec)
+    else:
+        if isinstance(descriptor, dict) and descriptor.get("key"):
+            path = finalize_flac(path, descriptor)
+        with path.open("rb") as audio:
+            header = audio.read(10)
+            if header.startswith(b"ID3") and len(header) == 10 and all(n < 128 for n in header[6:10]):
+                size = 0
+                for byte in header[6:10]:
+                    size = (size << 7) | byte
+                audio.seek(10 + size + (10 if header[3] == 4 and header[5] & 16 else 0))
+                header = audio.read(4)
+        if not header.startswith(b"fLaC"):
+            raise RuntimeError(f"{label} returned a file without a FLAC header (format: {actual}): {path}")
     if args.gui:
-        if args.format != "FLAC":
+        if args.format in {"MP3", "M4A"}:
             converted = output / f"converted.{args.format.lower()}"
             codec = ["-c:a", "aac", "-b:a", "256k"] if args.format == "M4A" else [
                 "-c:a", "libmp3lame", "-b:a", "320k",
             ]
-            subprocess.run([ffmpeg_path(), "-nostdin", "-v", "error", "-xerror",
+            subprocess.run([media_tool("ffmpeg"), "-nostdin", "-v", "error", "-xerror",
                             "-i", str(path), "-map", "0:a:0", *codec, str(converted)],
                            check=True, timeout=120)
             path = converted
@@ -319,7 +361,7 @@ if __name__ == "__main__":
     parser.add_argument("output", type=Path, help="New directory for the test download")
     parser.add_argument("--gui", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--inspect", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--format", choices=("FLAC", "M4A", "MP3"), default="FLAC")
+    parser.add_argument("--format", choices=("FLAC", "FLAC-CD", "M4A", "MP3", *DOLBY_FORMATS), default="FLAC")
     args = parser.parse_args()
     if args.output.exists() and not args.gui:
         parser.error("Choose a new output directory so the test cannot match an old file.")

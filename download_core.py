@@ -74,7 +74,9 @@ def download_command(executable, folder, mode, url, preferences, index=None,
         command += ["-P", f"temp:{temporary}"]
     command += ["--force-overwrites", "--no-continue"] if restart else ["--continue"]
     if mode in AUDIO:
-        command += ["-x", "--audio-format", mode.lower(), "--audio-quality", "0"]
+        if mode == "MP3":
+            command += ["-f", "bestaudio/best"]
+        command += ["-x", "--audio-format", mode.lower(), "--audio-quality", "320K" if mode == "MP3" else "0"]
     else:
         limit = "" if mode == "best" else f"[height<={mode[:-1]}]"
         output_mode = preferences.get("video_output", "auto")
