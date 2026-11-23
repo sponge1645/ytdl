@@ -210,6 +210,16 @@ def track_metadata(track, fallback_cover=""):
     return metadata
 
 
+def resolve_music_link(engine, url, provider, gui):
+    try:
+        return resolve_collection(engine, url)
+    except RuntimeError as error:
+        if "verification required" not in str(error).casefold():
+            raise
+    verify(engine, "amazon" if provider == "amzn" else provider, gui)
+    return resolve_collection(engine, url)
+
+
 def resolve_collection(engine, url):
     result = engine.call("handleURLWithExtension", {"url": url})
     kind = result.get("type") if isinstance(result, dict) else None
@@ -393,7 +403,7 @@ def run(args, home):
             if not track:
                 raise RuntimeError("The queued track has invalid metadata.")
         else:
-            kind, tracks, skipped = resolve_collection(engine, args.url)
+            kind, tracks, skipped = resolve_music_link(engine, args.url, provider, args.gui)
             if args.inspect:
                 print("YTDL_METADATA " + json.dumps({"kind": kind, "tracks": tracks, "skipped": skipped}))
                 return

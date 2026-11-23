@@ -1156,7 +1156,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         var metadata: [String: Any]?
         item.inspectingMusic = true
         item.process = musicPreview.run(link: link, folder: outputFolder(for: "audio_folder"),
-                                        source: nil, format: "FLAC", inspect: true, status: { _ in },
+                                        source: nil, format: "FLAC", inspect: true, status: { [weak self] message in
+            self?.status.stringValue = localized(message)
+        },
                                         event: { _, data in
             metadata = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         }, finish: { [weak self, weak item] code, message in
