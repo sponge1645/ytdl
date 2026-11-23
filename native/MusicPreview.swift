@@ -130,11 +130,16 @@ final class MusicPreview {
               let input = pendingInputs[state],
               items.filter({ $0.name == "grant" }).count == 1,
               let grant = items.first(where: { $0.name == "grant" })?.value, !grant.isEmpty else { return false }
-        do {
-            try input.write(contentsOf: Data((url.absoluteString + "\n").utf8))
-        } catch {
-            closeVerification(input)
-            return false
+        let data = Data((url.absoluteString + "\n").utf8)
+        if #available(macOS 10.15.4, *) {
+            do {
+                try input.write(contentsOf: data)
+            } catch {
+                closeVerification(input)
+                return false
+            }
+        } else {
+            input.write(data)
         }
         closeVerification(input)
         NSApp.activate(ignoringOtherApps: true)
