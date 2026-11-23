@@ -466,8 +466,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             .font: NSFont.systemFont(ofSize: 22, weight: .semibold), .foregroundColor: NSColor.labelColor
         ])
         let hint = MusicPreview.script == nil
-            ? localized("Paste or drop a link from YouTube, Vimeo, TikTok, SoundCloud, Instagram and more (⌘V).")
-            : localized("Paste or drop a link from YouTube, Vimeo, Spotify, Apple Music, YouTube Music, SoundCloud, TikTok, Instagram, Amazon Music, Tidal, Qobuz, Deezer, Beatport or JioSaavn (⌘V).")
+            ? localized("Paste or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, TikTok, SoundCloud, Instagram and more (⌘V).")
+            : localized("Paste or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, Spotify, Apple Music, YouTube Music, SoundCloud, TikTok, Instagram, Amazon Music, Tidal, Qobuz, Deezer, Beatport, JioSaavn and more (⌘V).")
         let emptyContent = NSMutableAttributedString(attributedString: heading)
         emptyContent.append(NSAttributedString(string: "\n\n" + hint, attributes: [
             .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor
