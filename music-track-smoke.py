@@ -309,6 +309,12 @@ DOLBY_FORMATS = {
 }
 
 
+DOLBY_LABELS = {
+    "M4A-DDP": "Dolby Digital Plus (M4A)",
+    "M4A-ATMOS": "Dolby Atmos (M4A)",
+    "MP4-ATMOS": "Dolby Atmos (MP4)",
+}
+
 CD_QUALITY_SOURCES = ("tidal-web", "qobuz-web")
 FLAC_SOURCES = (*CD_QUALITY_SOURCES, "amazon", "deezer", "beatport")
 UNAVAILABLE_ERRORS = {
@@ -374,7 +380,7 @@ def finalize_dolby(path, descriptor, extension, expected_codec):
         if not streams or streams[0].get("codec_name", "").replace("-", "") != expected_codec:
             raise AudioUnavailable("The source did not return the requested Dolby codec.")
     if remux_failed:
-        raise RuntimeError(f"FFmpeg could not save the {expected_codec.upper()} track without re-encoding.")
+        raise RuntimeError(f"The service returned a file, but FFmpeg could not save it as {expected_codec.upper()} without re-encoding.")
     result.check_returncode()
     return staged
 
@@ -587,7 +593,10 @@ def download_track(engine, track, provider, service, audio_format, output, desti
         error_type = AudioUnavailable if isinstance(reason, str) and reason in UNAVAILABLE_ERRORS else RuntimeError
         http_status = provider_http_status(result)
         detail = f"{reason}, HTTP {http_status}" if http_status else reason
-        raise error_type(f"{label} did not return {audio_format} ({detail}).")
+        format_label = DOLBY_LABELS.get(audio_format, audio_format)
+        if error_type is AudioUnavailable and reason not in {"api_error", "timeout"}:
+            raise AudioUnavailable(f"{label}: track not found in {format_label} ({detail}).")
+        raise error_type(f"{label}: could not retrieve the track in {format_label} ({detail}).")
     reported = result.get("file_path")
     actual = result.get("actual_extension") or "unknown"
     if not isinstance(reported, str) or not reported:
@@ -601,7 +610,10 @@ def download_track(engine, track, provider, service, audio_format, output, desti
     original = path
     descriptor = result.get("decryption")
     if dolby:
-        path = finalize_dolby(path, descriptor, extension, expected_codec)
+        try:
+            path = finalize_dolby(path, descriptor, extension, expected_codec)
+        except AudioUnavailable as error:
+            raise AudioUnavailable(f"{label}: track not found in {DOLBY_LABELS[audio_format]}. {error}") from error
     elif compressed:
         input_codec = audio_codec(path)
         if not input_codec:

@@ -81,7 +81,8 @@ class MusicSourceTests(unittest.TestCase):
                 if success:
                     RUN(args, root)
                 else:
-                    with self.assertRaisesRegex(RuntimeError, error_type):
+                    message = "track not found in Dolby Digital Plus" if error_type == "track_not_found" else error_type
+                    with self.assertRaisesRegex(RuntimeError, message):
                         RUN(args, root)
             self.assertEqual(list(root.glob("*.flac")), [root / "Artist - Song.flac"] if success else [])
         self.assertEqual([request["service"] for request in requests], services)
