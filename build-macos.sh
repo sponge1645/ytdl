@@ -64,7 +64,7 @@ else
     builder="$staging/venv/bin/python"
     "$builder" -m pip install --disable-pip-version-check \
         "pyinstaller==6.21.0" "${YTDL_YTDLP_REQUIREMENT:-yt-dlp[default]==2026.10.26}" \
-        "${YTDL_PARTH_REQUIREMENT:-parth-dl==1.2.0}"
+        "${YTDL_PARTH_REQUIREMENT:-parth-dl==1.2.1}"
     "$builder" -m PyInstaller --noconfirm --onedir --name ytdl-engine \
         --distpath "$staging/engine-dist" --workpath "$staging/engine-build" --specpath "$staging" \
         --paths "$PWD" --paths "$PWD/native" --exclude-module tkinter --collect-submodules yt_dlp --collect-data yt_dlp --collect-all yt_dlp_ejs \

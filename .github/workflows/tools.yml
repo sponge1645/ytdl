@@ -28,10 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      parth_version: ${{ steps.version.outputs.parth_version }}
       build: ${{ steps.version.outputs.build }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Find the latest stable yt-dlp release
+      - name: Find stable downloader releases
         id: version
         env:
           EVENT: ${{ github.event_name }}
@@ -46,47 +47,60 @@ jobs:
           from urllib.request import urlopen
 
           def version_key(version):
-              if not re.fullmatch(r"[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(?:\.[0-9]+)?", version):
-                  raise ValueError(f"Unexpected yt-dlp version: {version!r}")
+              if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){2,3}", version):
+                  raise ValueError(f"Unexpected stable version: {version!r}")
               return tuple(map(int, version.split(".")))
 
-          with urlopen("https://pypi.org/pypi/yt-dlp/json", timeout=30) as response:
-              release = json.load(response)
-          latest = release["info"]["version"]
-          usable_files = [file for file in release["urls"] if not file.get("yanked", False)]
-          if not usable_files:
-              raise RuntimeError("The latest PyPI release has no usable files")
-
           script = Path("build-macos.sh").read_text()
-          pinned = re.search(r"yt-dlp\[default\]==([0-9.]+)", script)[1]
-          candidate = max((pinned, latest), key=version_key)
-          try:
-              with urlopen("https://github.com/sponge1645/ytdl/releases/download/tools-v1/yt-dlp-version.txt",
-                           timeout=30) as response:
-                  published = response.read(128).decode("ascii").strip()
-          except HTTPError as error:
-              if error.code != 404:
-                  raise
-              published = None
-
-          if published is not None and version_key(candidate) < version_key(published):
-              raise RuntimeError("Refusing to build an older yt-dlp version than the published kit")
           scheduled = os.environ["EVENT"] == "schedule"
-          build = not scheduled or published is None or version_key(candidate) > version_key(published)
-          if scheduled and build:
-              if candidate != latest:
-                  raise RuntimeError("Cannot verify upload times for the pinned fallback")
-              cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
-              newest_upload = max(
-                  datetime.fromisoformat(file["upload_time_iso_8601"].replace("Z", "+00:00"))
-                  for file in usable_files
-              )
-              if newest_upload > cutoff:
-                  print(f"Deferring yt-dlp {candidate} until its files have aged 48 hours")
-                  build = False
-          print(f"yt-dlp candidate: {candidate}; published baseline: {published}; build: {build}")
+          cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+          versions = {}
+          changed = False
+          ready = True
+
+          for package, requirement, output_key in (
+              ("yt-dlp", r"yt-dlp\[default\]", "version"),
+              ("parth-dl", "parth-dl", "parth_version"),
+          ):
+              with urlopen(f"https://pypi.org/pypi/{package}/json", timeout=30) as response:
+                  release = json.load(response)
+              latest = release["info"]["version"]
+              files = [file for file in release["urls"] if not file.get("yanked", False)]
+              if not files:
+                  raise RuntimeError(f"{package}: the latest PyPI release has no usable files")
+              pinned = re.search(requirement + r"==([0-9.]+)", script)[1]
+              candidate = max((pinned, latest), key=version_key)
+              try:
+                  with urlopen(f"https://github.com/sponge1645/ytdl/releases/download/tools-v1/{package}-version.txt",
+                               timeout=30) as response:
+                      published = response.read(128).decode("ascii").strip()
+              except HTTPError as error:
+                  if error.code != 404:
+                      raise
+                  published = None
+
+              if published is not None and version_key(candidate) < version_key(published):
+                  raise RuntimeError(f"Refusing to downgrade {package} from the published kit")
+              needs_update = published is None or version_key(candidate) > version_key(published)
+              changed |= needs_update
+              if scheduled and needs_update:
+                  if candidate != latest:
+                      raise RuntimeError(f"{package}: cannot verify upload times for the pinned fallback")
+                  newest_upload = max(
+                      datetime.fromisoformat(file["upload_time_iso_8601"].replace("Z", "+00:00"))
+                      for file in files
+                  )
+                  if newest_upload > cutoff:
+                      print(f"Deferring {package} {candidate} until its files have aged 48 hours")
+                      ready = False
+              versions[output_key] = candidate
+              print(f"{package} candidate: {candidate}; published baseline: {published}")
+
+          build = not scheduled or (changed and ready)
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"version={candidate}\nbuild={str(build).lower()}\n")
+              for name, version in versions.items():
+                  output.write(f"{name}={version}\n")
+              output.write(f"build={str(build).lower()}\n")
           PY
 
   package:
@@ -108,6 +122,7 @@ jobs:
           python-version: "3.13"
       - env:
           YTDL_YTDLP_REQUIREMENT: yt-dlp[default]==${{ needs.resolve.outputs.version }}
+          YTDL_PARTH_REQUIREMENT: parth-dl==${{ needs.resolve.outputs.parth_version }}
         run: |
           test "$(uname -m)" = "${{ matrix.arch }}"
           bash build-macos.sh --engine-kit
@@ -243,6 +258,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           YTDLP_VERSION: ${{ needs.resolve.outputs.version }}
+          PARTH_VERSION: ${{ needs.resolve.outputs.parth_version }}
         run: |
           set -euo pipefail
           : "${GH_TOKEN:?Missing GitHub Actions token}"
@@ -250,5 +266,6 @@ jobs:
             gh release create tools-v1 --draft --prerelease --target "$GITHUB_SHA" --title "Engine updates v1" --notes "Signed engine kits for Media Downloader."
           gh release upload tools-v1 publish/*.zip publish/*.manifest publish/*.sig --clobber
           printf '%s\n' "$YTDLP_VERSION" > publish/yt-dlp-version.txt
-          gh release upload tools-v1 publish/yt-dlp-version.txt --clobber
+          printf '%s\n' "$PARTH_VERSION" > publish/parth-dl-version.txt
+          gh release upload tools-v1 publish/yt-dlp-version.txt publish/parth-dl-version.txt --clobber
           gh release edit tools-v1 --draft=false --prerelease
