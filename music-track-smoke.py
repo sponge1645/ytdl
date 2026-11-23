@@ -114,7 +114,7 @@ def run(args, home):
         raise RuntimeError("The engine could not load the Amazon extension.")
     request = {
         "contract_version": 1, "service": "amazon", "download_provider": "amazon",
-        "provider_track_id": args.track_id, "track_name": args.title,
+        "source": "amazon", "provider_track_id": args.track_id, "track_name": args.title,
         "artist_name": args.artist, "output_dir": str(output), "output_ext": "flac",
         "quality": "best", "item_id": str(uuid4()), "use_extensions": True,
         "use_fallback": False, "embed_metadata": True,
