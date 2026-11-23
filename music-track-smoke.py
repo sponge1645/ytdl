@@ -1,4 +1,4 @@
-"""Run one FLAC job through the bundled Mornye desktop ABI."""
+"""Run one music download through the bundled Mornye desktop ABI."""
 import argparse
 import base64
 import ctypes
@@ -270,6 +270,50 @@ DOLBY_FORMATS = {
 }
 
 
+CD_QUALITY_SOURCES = ("tidal-web", "qobuz-web")
+FLAC_SOURCES = (*CD_QUALITY_SOURCES, "amazon", "deezer", "beatport")
+UNAVAILABLE_ERRORS = {
+    "not_found", "track_not_found", "no_match", "no_results", "unavailable",
+    "track_unavailable", "format_unavailable", "quality_unavailable",
+    "unsupported_format", "unsupported_quality",
+}
+
+
+class AudioUnavailable(RuntimeError):
+    pass
+
+
+def download_source(provider, source, audio_format):
+    dolby = DOLBY_FORMATS.get(audio_format)
+    if dolby:
+        required_source = dolby[0]
+        if source and source != required_source:
+            raise RuntimeError("The selected Dolby format is unavailable from this source.")
+        return required_source
+    default_source = "amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider
+    if audio_format == "FLAC-CD":
+        if source and source not in CD_QUALITY_SOURCES:
+            raise RuntimeError("This source does not offer a separate CD-quality request.")
+        return source or (default_source if default_source in CD_QUALITY_SOURCES else "tidal-web")
+    if audio_format == "FLAC":
+        if source and source not in FLAC_SOURCES:
+            raise RuntimeError("This source does not offer FLAC.")
+        return source or (default_source if default_source in FLAC_SOURCES else FLAC_SOURCES[0])
+    return source or default_source
+
+
+def download_attempts(provider, source, audio_format):
+    primary = download_source(provider, source, audio_format)
+    yield primary, audio_format
+    if source:
+        return
+    if audio_format in DOLBY_FORMATS:
+        yield from ((service, "FLAC") for service in FLAC_SOURCES if service != primary)
+    elif audio_format in {"FLAC", "FLAC-CD"}:
+        services = FLAC_SOURCES if audio_format == "FLAC" else CD_QUALITY_SOURCES
+        yield from ((service, audio_format) for service in services if service != primary)
+
+
 def finalize_dolby(path, descriptor, extension, expected_codec):
     staged = path.parent / ("dolby-final" + extension)
     input_options = []
@@ -281,14 +325,18 @@ def finalize_dolby(path, descriptor, extension, expected_codec):
     result = subprocess.run([media_tool("ffmpeg"), "-nostdin", "-v", "error", "-xerror",
                              *input_options, "-i", str(path), "-map", "0:a:0",
                              "-c:a", "copy", "-f", "mp4", str(staged)], capture_output=True, timeout=120)
-    if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg could not save the {expected_codec.upper()} track without re-encoding.")
+    remux_failed = result.returncode != 0
+    probe_path = path if remux_failed else staged
     result = subprocess.run([media_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
-                             "-show_entries", "stream=codec_name,profile", "-of", "json", str(staged)],
-                            capture_output=True, text=True, timeout=30, check=True)
-    streams = json.loads(result.stdout).get("streams", [])
-    if not streams or streams[0].get("codec_name", "").replace("-", "") != expected_codec:
-        raise RuntimeError("The source did not return the requested Dolby codec.")
+                             "-show_entries", "stream=codec_name,profile", "-of", "json", str(probe_path)],
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode == 0:
+        streams = json.loads(result.stdout).get("streams", [])
+        if not streams or streams[0].get("codec_name", "").replace("-", "") != expected_codec:
+            raise AudioUnavailable("The source did not return the requested Dolby codec.")
+    if remux_failed:
+        raise RuntimeError(f"FFmpeg could not save the {expected_codec.upper()} track without re-encoding.")
+    result.check_returncode()
     return staged
 
 
@@ -393,14 +441,10 @@ def run(args, home):
     library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
-    package, quality, label = DOWNLOADERS[service]
     with open_music_engine(library, home, output) as engine:
         engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
         if not args.track_json:
             install_package(engine, home, provider)
-        if not args.inspect and (args.track_json or package != provider):
-            install_package(engine, home, package)
         if args.track_json:
             track = track_metadata(json.loads(args.track_json))
             if not track:
@@ -413,55 +457,73 @@ def run(args, home):
             if kind != "track":
                 raise RuntimeError("Add the album or playlist to the app queue to download its tracks.")
             track = tracks[0]
-        cover = track["cover_url"]
-        engine.call("setDownloadDirectory", {"path": str(output)})
-        dolby = DOLBY_FORMATS.get(args.format)
-        compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and args.format == "M4A")
-        if compressed and args.format not in {"M4A", "MP3"}:
-            raise RuntimeError("Choose M4A or MP3 for this source.")
-        if compressed and service == "beatport":
-            quality = "HIGH"
-        extension = ".m4a" if compressed else ".flac"
-        if args.format == "FLAC-CD":
-            if service not in {"tidal-web", "qobuz-web"}:
-                raise RuntimeError("This source does not offer a separate CD-quality request.")
-            quality = "LOSSLESS"
-        if dolby:
-            required_source, quality, extension, expected_codec = dolby
-            if service != required_source:
-                raise RuntimeError("The selected Dolby format is unavailable from this source.")
-        print(f"Searching {label} for {track['artists']} — {track['name']}", flush=True)
-        stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
-        stem = " ".join(stem.split()).strip(". ")
-        stem = stem.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(". ") or "Track"
-        request = {
-            "contract_version": 1, "service": service, "download_provider": service,
-            "track_name": track["name"], "artist_name": track["artists"],
-            "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
-            "album_name": track.get("album_name") or "", "cover_url": cover,
-            "output_dir": str(output), "output_path": str(output / f"{stem}{extension}"),
-            "output_ext": extension,
-            "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
-            "use_fallback": False, "embed_metadata": True,
-        }
-        if service == provider and service in {"beatport", "jiosaavn", "ytmusic-spotiflac"}:
-            request["provider_track_id"] = track.get("id") or ""
-        if provider == "spotify-web":
-            request["spotify_id"] = track.get("spotify_id") or track.get("id") or ""
-        for field in ("track_number", "disc_number", "total_tracks", "total_discs"):
-            value = track.get(field)
-            if type(value) is int and value > 0:
-                request[field] = value
-        if args.gui:
-            engine.progress_item = request["item_id"]
-            engine.lib.mornye_subscribe(10)
+        failures = []
+        for index, (service, audio_format) in enumerate(download_attempts(provider, args.source, args.format)):
+            package = DOWNLOADERS[service][0]
+            if args.track_json or package != provider:
+                install_package(engine, home, package)
+            attempt_dir = output
+            if index:
+                attempt_dir = output / service
+                attempt_dir.mkdir()
+            try:
+                download_track(engine, track, provider, service, audio_format, attempt_dir,
+                               output.parent, args.gui)
+                return
+            except AudioUnavailable as error:
+                failures.append(str(error))
+                print(error, flush=True)
+        raise RuntimeError(" ".join(failures))
+
+
+def download_track(engine, track, provider, service, audio_format, output, destination_folder, gui):
+    _, quality, label = DOWNLOADERS[service]
+    cover = track["cover_url"]
+    engine.call("setDownloadDirectory", {"path": str(output)})
+    dolby = DOLBY_FORMATS.get(audio_format)
+    compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and audio_format == "M4A")
+    if compressed and audio_format not in {"M4A", "MP3"}:
+        raise RuntimeError("Choose M4A or MP3 for this source.")
+    if compressed and service == "beatport":
+        quality = "HIGH"
+    extension = ".m4a" if compressed else ".flac"
+    if audio_format == "FLAC-CD":
+        quality = "LOSSLESS"
+    if dolby:
+        _, quality, extension, expected_codec = dolby
+    print(f"Searching {label} ({audio_format}) for {track['artists']} — {track['name']}", flush=True)
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
+    stem = " ".join(stem.split()).strip(". ")
+    stem = stem.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(". ") or "Track"
+    request = {
+        "contract_version": 1, "service": service, "download_provider": service,
+        "track_name": track["name"], "artist_name": track["artists"],
+        "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
+        "album_name": track.get("album_name") or "", "cover_url": cover,
+        "output_dir": str(output), "output_path": str(output / f"{stem}{extension}"),
+        "output_ext": extension,
+        "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
+        "use_fallback": False, "embed_metadata": True,
+    }
+    if service == provider and service in {"beatport", "jiosaavn", "ytmusic-spotiflac"}:
+        request["provider_track_id"] = track.get("id") or ""
+    if provider == "spotify-web":
+        request["spotify_id"] = track.get("spotify_id") or track.get("id") or ""
+    for field in ("track_number", "disc_number", "total_tracks", "total_discs"):
+        value = track.get(field)
+        if type(value) is int and value > 0:
+            request[field] = value
+    if gui:
+        engine.progress_item = request["item_id"]
+        engine.lib.mornye_subscribe(10)
+    result = engine.call("downloadByStrategy", json.dumps(request))
+    if isinstance(result, dict) and result.get("error_type") == "verification_required":
+        verify(engine, service, gui)
         result = engine.call("downloadByStrategy", json.dumps(request))
-        if isinstance(result, dict) and result.get("error_type") == "verification_required":
-            verify(engine, service, args.gui)
-            result = engine.call("downloadByStrategy", json.dumps(request))
     if not isinstance(result, dict) or result.get("success") is not True:
         reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
-        raise RuntimeError(f"{label} did not complete the test download ({reason}).")
+        error_type = AudioUnavailable if isinstance(reason, str) and reason in UNAVAILABLE_ERRORS else RuntimeError
+        raise error_type(f"{label} did not return {audio_format} ({reason}).")
     reported = result.get("file_path")
     actual = result.get("actual_extension") or "unknown"
     if not isinstance(reported, str) or not reported:
@@ -495,20 +557,20 @@ def run(args, home):
                 audio.seek(10 + size + (10 if header[3] == 4 and header[5] & 16 else 0))
                 header = audio.read(4)
         if not header.startswith(b"fLaC"):
-            raise RuntimeError(f"{label} returned a file without a FLAC header (format: {actual}): {path}")
-    if args.gui:
+            raise AudioUnavailable(f"{label} returned a file without a FLAC header (format: {actual}): {path}")
+    if gui:
         codec = ["-c:a", "copy"]
-        if args.format == "MP3":
+        if audio_format == "MP3":
             codec = ["-c:a", "libmp3lame", "-b:a", "320k"]
-        elif args.format == "M4A" and not (compressed and input_codec == "aac"):
+        elif audio_format == "M4A" and not (compressed and input_codec == "aac"):
             codec = ["-c:a", "aac", "-b:a", "256k"]
-        extension = "." + args.format.lower() if args.format in {"MP3", "M4A"} else extension
+        extension = "." + audio_format.lower() if audio_format in {"MP3", "M4A"} else extension
         print(f"Writing metadata: {track['artists']} — {track['name']}", flush=True)
         path = write_metadata(path, output / ("tagged" + extension), track, codec)
         suffix = path.suffix.lower()
         for number in itertools.count(1):
             name = stem if number == 1 else f"{stem} ({number})"
-            destination = args.output.resolve().parent / f"{name}{suffix}"
+            destination = destination_folder / f"{name}{suffix}"
             try:
                 os.link(path, destination)
             except FileExistsError:
@@ -518,7 +580,7 @@ def run(args, home):
     else:
         if isinstance(descriptor, dict) and descriptor.get("key") and original != path:
             original.unlink()
-        print(f"Saved FLAC: {path}")
+        print(f"Saved {audio_format if dolby else 'FLAC'}: {path}")
 
 
 def maintain_metadata_extensions(args, home):

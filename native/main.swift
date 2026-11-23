@@ -145,7 +145,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private let visibleCount = NSTextField(labelWithString: "")
     private let queueCount = NSTextField(labelWithString: "0")
     private let completedCount = NSTextField(labelWithString: "0")
-    let status = NSTextField(labelWithString: localized("Preparing download tools…"))
+    private let status = NSTextField(labelWithString: localized("Preparing download tools…"))
+    private var statusClearTimer: Timer?
     let title = NSTextField(labelWithString: localized("Queue"))
     let empty = EmptyQueueView()
     let mode = NSSegmentedControl(labels: [localized("Video"), localized("Audio")], trackingMode: .selectOne, target: nil, action: nil)
@@ -510,6 +511,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         empty.addArrangedSubview(dropHint)
         for view in [scroll, empty] { view.translatesAutoresizingMaskIntoConstraints = false }
         let footer = NSStackView(views: [visibleCount, status, NSView(), button("Clear List", #selector(clearList))])
+        status.isSelectable = true
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let footerDivider = separator()
@@ -607,6 +609,23 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             .appendingPathComponent(engineArchitecture)
     }
 
+    private func setFooterStatus(_ message: String, error: Bool = false) {
+        statusClearTimer?.invalidate()
+        statusClearTimer = nil
+        if status.stringValue != message {
+            status.abortEditing()
+            status.stringValue = message
+            status.toolTip = message.isEmpty ? nil : message
+        }
+        if error && !message.isEmpty {
+            let timer = Timer(timeInterval: 15, repeats: false) { [weak self] _ in
+                self?.setFooterStatus("")
+            }
+            statusClearTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
     private func process(_ arguments: [String], executable: URL? = nil, event: @escaping ([String: Any]) -> Void,
                          finish: @escaping (Int32) -> Void) -> Process? {
         let bundledEngine = resources.appendingPathComponent("engine/ytdl-engine")
@@ -614,7 +633,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let engine = executable ?? (bundledActions.contains(arguments.first ?? "") && !isUniversalDownload
                                     ? bundledEngine : (updatedEngine ?? bundledEngine))
         guard FileManager.default.isExecutableFile(atPath: engine.path) else {
-            status.stringValue = localized("Download engine unavailable")
+            setFooterStatus(localized("Download engine unavailable"), error: true)
             appendLog(status.stringValue)
             return nil
         }
@@ -626,7 +645,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
            NativePreferences.read()["proxy_in_keychain"] as? Bool == true {
             guard engineSupportsKeychainProxy, let proxy = try? ProxyKeychain.read() else {
                 let message = localized("Proxy unavailable. Update the tools or check Keychain access.")
-                status.stringValue = message
+                setFooterStatus(message, error: true)
                 appendLog(message)
                 return nil
             }
@@ -638,7 +657,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         process.standardOutput = pipe
         process.standardError = pipe
         do { try process.run() } catch {
-            status.stringValue = error.localizedDescription
+            setFooterStatus(error.localizedDescription, error: true)
             appendLog(error.localizedDescription)
             return nil
         }
@@ -886,7 +905,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
             if let label = message["status"] as? String {
                 engineError = localized(label)
-                self?.status.stringValue = engineError
+                self?.setFooterStatus(engineError, error: message["event"] as? String == "error")
             }
         }, finish: { [weak self] code in
             guard let self = self else { return }
@@ -902,13 +921,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             self.toolsReady = code == 0
             if code == 0 {
                 self.closeInstallSheet()
-                self.status.stringValue = localized("Ready · ⌘V to add a link")
+                self.setFooterStatus(localized("Ready · ⌘V to add a link"))
                 if self.engineSupportsKeychainProxy {
                     do {
                         try NativePreferences.migrateLegacyProxy()
                     } catch {
                         let message = localized("Could not move proxy settings to Keychain.")
-                        self.status.stringValue = message
+                        self.setFooterStatus(message, error: true)
                         self.appendLog(message)
                     }
                 }
@@ -918,6 +937,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     self.addLinks(links)
                 }
                 self.checkForAppUpdatesAutomatically()
+            } else {
+                self.setFooterStatus(engineError.isEmpty ? localized("Download engine unavailable") : engineError, error: true)
             }
         })
         if setup == nil && isUniversalDownload {
@@ -1127,13 +1148,16 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
            let url = URL(string: text), url.scheme?.lowercased() == "mornye" {
             if !musicPreview.acceptVerification(url) {
-                status.stringValue = localized("This return link does not match an active verification. Retry the track for a new link.")
+                setFooterStatus(localized("This return link does not match an active verification. Retry the track for a new link."), error: true)
             }
             return
         }
         guard toolsReady else { NSSound.beep(); return }
         let pasted = links(from: NSPasteboard.general)
-        guard !pasted.isEmpty else { status.stringValue = localized("Copy an HTTP or HTTPS link first."); return }
+        guard !pasted.isEmpty else {
+            setFooterStatus(localized("Copy an HTTP or HTTPS link first."), error: true)
+            return
+        }
         addLinks(pasted)
     }
 
@@ -1146,7 +1170,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 continue
             }
             showMusicControls(for: nil)
-            status.stringValue = localized("Reading link…")
+            setFooterStatus(localized("Reading link…"))
             _ = process(["inspect", link], event: { [weak self] message in
                 guard let self = self else { return }
                 if let items = message["items"] as? [[String: Any]] {
@@ -1163,10 +1187,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                         added.forEach { self.schedule($0) }
                         self.dispatch()
                     }
-                    if self.status.stringValue == localized("Reading link…") { self.status.stringValue = "" }
+                    if self.status.stringValue == localized("Reading link…") { self.setFooterStatus("") }
                     self.refresh()
                 } else if let label = message["status"] as? String {
-                    self.status.stringValue = localized(label)
+                    self.setFooterStatus(localized(label), error: message["event"] as? String == "error")
                 }
             }, finish: { _ in })
         }
@@ -1187,7 +1211,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.inspectingMusic = true
         item.process = musicPreview.run(link: link, folder: outputFolder(for: "audio_folder"),
                                         source: nil, format: "FLAC", inspect: true, status: { [weak self] message in
-            self?.status.stringValue = localized(message)
+            self?.setFooterStatus(localized(message))
         },
                                         event: { _, data in
             metadata = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -1206,14 +1230,14 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 item.scheduled = false
                 item.startedMode = nil
                 item.status = "Error"
-                self.status.stringValue = item.lastError
+                self.setFooterStatus(item.lastError, error: true)
             }
             self.dispatch()
         })
         if item.process == nil {
             item.inspectingMusic = false
             item.status = "Error"
-            status.stringValue = "Could not launch the music engine."
+            setFooterStatus("Could not launch the music engine.", error: true)
         }
         refresh()
     }
@@ -1240,7 +1264,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
         downloads.replaceSubrange(index...index, with: added)
         if skipped > 0 {
-            status.stringValue = String(format: localized("%d unavailable tracks skipped."), skipped)
+            setFooterStatus(String(format: localized("%d unavailable tracks skipped."), skipped))
         }
         refresh(replacing: item.id, with: added.first?.id)
     }
@@ -1266,8 +1290,16 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     private func showMusicControls(for item: Download?) {
-        if musicSelection === item { return }
-        if musicSelection == nil {
+        let resetSharedFormat = sharedAudioFormat != nil && !downloads.contains {
+            $0.music && !$0.done && !$0.pendingRemoval
+        }
+        if resetSharedFormat { sharedAudioFormat = nil }
+        if let item = item {
+            guard musicSelection !== item else { return }
+        } else if mode.isEnabled && !resetSharedFormat {
+            return
+        }
+        if mode.isEnabled && !resetSharedFormat {
             previousMode = mode.selectedSegment
             previousFormat = selectedFormat
         }
@@ -1297,15 +1329,21 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             item.musicSource = musicSource.indexOfSelectedItem
             for row in pendingMusicGroup(for: item) {
                 row.musicSource = item.musicSource
-                if !formatChoices.contains(row.musicFormat) { row.musicFormat = defaultMusicFormat(for: row) }
+                if !musicFormatChoices(for: row).contains(row.musicFormat) {
+                    row.musicFormat = defaultMusicFormat(for: row)
+                }
             }
             changeMode()
         }
     }
 
-    private func effectiveSource(for item: Download) -> String {
+    private func explicitMusicSource(for item: Download) -> String? {
         let index = item.musicSource
-        if musicSources.indices.contains(index), index > 0 { return musicSources[index] }
+        return musicSources.indices.contains(index) && index > 0 ? musicSources[index] : nil
+    }
+
+    private func effectiveSource(for item: Download) -> String {
+        if let source = explicitMusicSource(for: item) { return source }
         guard let host = URL(string: item.url)?.host else { return "amazon" }
         if host == "music.youtube.com" { return "ytmusic-spotiflac" }
         if host == "beatport.com" || host == "www.beatport.com" { return "beatport" }
@@ -1321,12 +1359,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     private func musicFormatChoices(for item: Download) -> [String] {
-        var choices = defaultMusicFormat(for: item) == "FLAC" ? ["FLAC"] : []
+        let manualSource = explicitMusicSource(for: item)
+        var choices = manualSource == nil || defaultMusicFormat(for: item) == "FLAC" ? ["FLAC"] : []
         let source = effectiveSource(for: item)
-        if source == "tidal-web" || source == "qobuz-web" { choices.append("FLAC-CD") }
+        if manualSource == nil || source == "tidal-web" || source == "qobuz-web" { choices.append("FLAC-CD") }
         choices.append("M4A")
-        if source == "tidal-web" { choices.append("M4A-ATMOS") }
-        if source == "amazon" { choices += ["M4A-DDP", "MP4-ATMOS"] }
+        if manualSource == nil || source == "tidal-web" { choices.append("M4A-ATMOS") }
+        if manualSource == nil || source == "amazon" { choices += ["M4A-DDP", "MP4-ATMOS"] }
         choices.append("MP3")
         return choices
     }
@@ -1375,8 +1414,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if let item = musicSelection, item.startedMode == nil {
             queuedMusicFormat = selectedFormat
             for row in pendingMusicGroup(for: item) { row.musicFormat = selectedFormat }
-            if selectedFormat == "MP3" || selectedFormat.hasPrefix("M4A") {
-                let shared = selectedFormat == "MP3" ? "MP3" : "M4A"
+            if selectedFormat == "MP3" || selectedFormat == "M4A" {
+                let shared = selectedFormat
                 sharedAudioFormat = shared
                 for pending in downloads where pending.music && !pending.done && pending.startedMode == nil && pending !== item && (item.musicCollection == nil || pending.musicCollection != item.musicCollection) {
                     pending.musicFormat = shared
@@ -1584,7 +1623,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             case "error":
                 if let label = message["status"] as? String {
                     item.lastError = label
-                    self.status.stringValue = localized(label)
+                    self.setFooterStatus(localized(label), error: true)
                 }
             default: return
             }
@@ -1625,13 +1664,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.status = "Connecting…"
         item.progress = 0
         item.lastError = ""
-        let source = effectiveSource(for: item)
-        appendLog("Music · " + item.title + " · " + source + " · " + format)
+        let source = explicitMusicSource(for: item)
+        appendLog("Music · " + item.title + " · " + (source ?? localized("Automatic")) + " · " + format)
         item.process = musicPreview.run(link: item.url, folder: outputFolder(for: "audio_folder"),
                                         source: source, format: format, trackJSON: item.musicTrackJSON,
                                         status: { [weak self, weak item] message in
             guard let self = self, let item = item, item.status != "Paused" else { return }
-            self.status.stringValue = message
+            self.setFooterStatus(message)
             item.status = "Downloading"
             self.refresh()
         }, log: { [weak self] message in
@@ -1658,7 +1697,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 item.lastError = item.done ? "" : message
                 self.appendLog("Music · " + item.status + " · " + item.title)
                 if !item.done { self.unlockMusicOptions(item) }
-                self.status.stringValue = item.lastError
+                self.setFooterStatus(item.lastError, error: true)
                 self.notify(item.done ? "Download completed" : "Download failed", body: item.title,
                             setting: item.done ? "notify_completed" : "notify_failed", enabledByDefault: true)
             }
@@ -1669,7 +1708,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             item.progress = nil
             item.status = "Error"
             unlockMusicOptions(item)
-            status.stringValue = "Could not launch the music engine."
+            setFooterStatus("Could not launch the music engine.", error: true)
         } else {
             notify("Download started", body: item.title, setting: "notify_started")
         }
@@ -1912,7 +1951,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
             downloads.removeAll { $0 === item }
         } catch {
-            status.stringValue = error.localizedDescription
+            setFooterStatus(error.localizedDescription, error: true)
         }
     }
 
