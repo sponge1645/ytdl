@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import ImageIO
+import Quartz
 import UserNotifications
 
 private final class Download {
@@ -91,18 +92,65 @@ private final class QueueTitleCell: NSStackView {
     required init?(coder: NSCoder) { fatalError("QueueTitleCell is created in code") }
 }
 
-private final class DownloadTable: NSTableView, NSMenuItemValidation {
+private final class DownloadTable: NSTableView, NSMenuItemValidation, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     var rowMenu: ((Int) -> NSMenu?)?
     var selectedFiles: (() -> [URL])?
     var removeSelection: (() -> Void)?
+    private var previewFiles: [URL] = []
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 49,
+           event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
+            if !event.isARepeat { toggleQuickLook() }
+            return
+        }
         if (event.keyCode == 51 || event.keyCode == 117), !selectedRowIndexes.isEmpty,
            event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
             removeSelection?()
             return
         }
         super.keyDown(with: event)
+    }
+
+    private func toggleQuickLook() {
+        guard let files = selectedFiles?(), !files.isEmpty, let panel = QLPreviewPanel.shared() else { return }
+        if panel.isVisible {
+            panel.orderOut(nil)
+        } else {
+            previewFiles = files
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
+        !previewFiles.isEmpty
+    }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = self
+        panel.delegate = self
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = nil
+        panel.delegate = nil
+        previewFiles.removeAll()
+    }
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        previewFiles.count
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        guard previewFiles.indices.contains(index) else { return nil }
+        return previewFiles[index] as NSURL
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
+        guard event.type == .keyDown, event.keyCode == 49,
+              event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else { return false }
+        if !event.isARepeat { panel.orderOut(nil) }
+        return true
     }
 
     @objc(copy:) func copySelectedFiles(_ sender: Any?) {
@@ -485,8 +533,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             .font: NSFont.systemFont(ofSize: 22, weight: .semibold), .foregroundColor: NSColor.labelColor
         ])
         let hint = MusicPreview.script == nil
-            ? localized("Paste or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, TikTok, SoundCloud, Instagram and more (⌘V).")
-            : localized("Paste or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, Spotify, Apple Music, YouTube Music, SoundCloud, TikTok, Instagram, Amazon Music, Tidal, Qobuz, Deezer, Beatport, JioSaavn and more (⌘V).")
+            ? localized("Paste (⌘V) or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, TikTok, SoundCloud, Instagram and more.")
+            : localized("Paste (⌘V) or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, Spotify, Apple Music, YouTube Music, SoundCloud, TikTok, Instagram, Amazon Music, Tidal, Qobuz, Deezer, Beatport, JioSaavn and more.")
         let emptyContent = NSMutableAttributedString(attributedString: heading)
         emptyContent.append(NSAttributedString(string: "\n\n" + hint, attributes: [
             .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor
@@ -921,7 +969,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             self.toolsReady = code == 0
             if code == 0 {
                 self.closeInstallSheet()
-                self.setFooterStatus(localized("Ready · ⌘V to add a link"))
+                self.setFooterStatus(localized("Ready · Paste (⌘V)"))
                 if self.engineSupportsKeychainProxy {
                     do {
                         try NativePreferences.migrateLegacyProxy()

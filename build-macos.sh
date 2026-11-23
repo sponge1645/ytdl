@@ -35,7 +35,7 @@ app="$staging/YouTube Downloader.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 compile_app() {
     xcrun --sdk macosx swiftc -O -target "$1" \
-        -framework AppKit -framework UserNotifications -framework Security native/*.swift -o "$2"
+        -framework AppKit -framework UserNotifications -framework Security -framework Quartz native/*.swift -o "$2"
 }
 executable="$app/Contents/MacOS/YouTubeDownloader"
 if [[ "$variant" == --universal ]]; then
