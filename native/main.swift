@@ -1683,6 +1683,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     let file = URL(fileURLWithPath: path)
                     if !item.files.contains(file) { item.files.append(file) }
                 }
+            case "youtube_session":
+                if item.status != "Paused", let label = message["status"] as? String {
+                    self.setFooterStatus(localized(label))
+                }
             case "progress":
                 if item.status != "Paused" {
                     item.status = message["status"] as? String ?? item.status

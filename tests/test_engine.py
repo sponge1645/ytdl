@@ -16,12 +16,13 @@ class EngineTests(unittest.TestCase):
         error = "ERROR: [youtube] ID: Sign in to confirm you’re not a bot."
         with patch.object(backend, "tool_path", return_value="yt-dlp"), \
                 patch.object(backend, "read_preferences", return_value={"proxy": "", "youtube_cookie_browser": "safari"}), \
-                patch.object(backend.subprocess, "run") as run, patch("sys.stdout", new_callable=io.StringIO):
+                patch.object(backend.subprocess, "run") as run, patch("sys.stdout", new_callable=io.StringIO) as out:
             run.side_effect = [
                 subprocess.CompletedProcess([], 1, stdout="", stderr=error),
                 subprocess.CompletedProcess([], 0, stdout='{"title": "Video"}', stderr=""),
             ]
             backend.inspect("https://www.youtube.com/watch?v=0ZHnq7V-GXA")
+        self.assertEqual(json.loads(out.getvalue().splitlines()[-1])["event"], "youtube_session")
         first, second = [call.args[0] for call in run.call_args_list]
         self.assertNotIn("--cookies-from-browser", first)
         self.assertEqual(second[-4:-2], ["--cookies-from-browser", "safari"])

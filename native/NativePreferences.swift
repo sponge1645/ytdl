@@ -61,6 +61,7 @@ final class NativePreferences: NSObject {
     private let parallel = NSPopUpButton()
     private let rate = NSTextField()
     private let youtubeBrowser = NSPopUpButton()
+    private let safariAccess = NSButton()
     private let youtubeBrowsers = ["", "safari", "chrome", "firefox"]
     private let proxy = NSSecureTextField()
     private let supportsKeychainProxy: Bool
@@ -114,6 +115,13 @@ final class NativePreferences: NSObject {
         youtubeBrowser.addItems(withTitles: [localized("Off"), "Safari", "Chrome", "Firefox"])
         youtubeBrowser.selectItem(at: youtubeBrowsers.firstIndex(of: prefs["youtube_cookie_browser"] as? String ?? "") ?? 0)
         youtubeBrowser.toolTip = localized("Use the selected browser session only when YouTube requires sign-in.")
+        youtubeBrowser.target = self
+        youtubeBrowser.action = #selector(youtubeBrowserChanged)
+        safariAccess.title = localized("Full Disk Access…")
+        safariAccess.bezelStyle = .rounded
+        safariAccess.target = self
+        safariAccess.action = #selector(requestSafariAccess)
+        safariAccess.isEnabled = youtubeBrowser.indexOfSelectedItem == 1
         proxy.placeholderString = "socks5://127.0.0.1:1080"
         output.addItems(withTitles: ["Auto — MP4 for QuickTime", "Original streams", "Convert to MP4"].map(localized))
         output.selectItem(at: outputModes.firstIndex(of: prefs["video_output"] as? String ?? "auto") ?? 0)
@@ -150,7 +158,7 @@ final class NativePreferences: NSObject {
         ])
         addTab("Network", to: tabs, with: [
             row("Proxy", proxy), row("Speed limit (KiB/s)", rate),
-            row("YouTube session", youtubeBrowser),
+            row("YouTube session", youtubeBrowser, trailing: safariAccess),
             NSTextField(labelWithString: localized("Set the speed limit to 0 for unlimited."))
         ])
 
@@ -269,6 +277,22 @@ final class NativePreferences: NSObject {
         let alert = NSAlert()
         alert.messageText = localized(message)
         alert.beginSheetModal(for: window, completionHandler: nil)
+    }
+
+    @objc private func youtubeBrowserChanged() {
+        safariAccess.isEnabled = youtubeBrowser.indexOfSelectedItem == 1
+        if safariAccess.isEnabled { requestSafariAccess() }
+    }
+
+    @objc private func requestSafariAccess() {
+        let alert = NSAlert()
+        alert.messageText = localized("Allow Safari cookie access")
+        alert.informativeText = localized("If access is not already enabled, add YouTube Downloader to Full Disk Access, then quit and reopen the app.")
+        alert.addButton(withTitle: localized("Open System Settings"))
+        alert.addButton(withTitle: localized("Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let pane = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
+        NSWorkspace.shared.open(pane)
     }
 
     @objc private func save() {

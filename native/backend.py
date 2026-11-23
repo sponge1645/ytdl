@@ -57,6 +57,9 @@ def proxy_config(command, proxy):
     return f"--proxy {shlex.quote(proxy)}\n"
 
 
+YOUTUBE_SESSION_ACCEPTED = "YouTube accepted the browser session."
+
+
 def youtube_cookie_retry(url, preferences, error):
     browser = preferences.get("youtube_cookie_browser")
     hosts = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
@@ -83,6 +86,7 @@ def inspect(url):
                "--socket-timeout", "15"]
     config = proxy_config(command, prefs["proxy"])
     result = subprocess.run([*command, "--", url], input=config, capture_output=True, text=True, timeout=90)
+    cookies = []
     if result.returncode:
         cookies = youtube_cookie_retry(url, prefs, result.stderr)
         if cookies:
@@ -95,6 +99,8 @@ def inspect(url):
     if "entries" not in data:
         emit("items", items=[{"url": url, "title": data.get("title") or url,
                              "thumbnail": data.get("thumbnail")}])
+        if cookies:
+            emit("youtube_session", status=YOUTUBE_SESSION_ACCEPTED)
         return
     items = []
     for entry in data.get("entries") or []:
@@ -111,6 +117,8 @@ def inspect(url):
     if not items:
         raise RuntimeError("No available playlist entries.")
     emit("items", items=items)
+    if cookies:
+        emit("youtube_session", status=YOUTUBE_SESSION_ACCEPTED)
 
 
 def download_public_instagram(url, folder, temp):
@@ -180,6 +188,7 @@ def download(request):
             commands.append(download_command(*args, **options, convert=True))
 
     cookies = []
+    session_reported = False
     for attempt, base_command in enumerate(commands):
         command = [*base_command[:-2], *cookies, *base_command[-2:]]
         config = proxy_config(command, prefs['proxy'])
@@ -212,6 +221,9 @@ def download(request):
             line = line.strip()
             if artlist:
                 line = line.replace(media_url, "[Artlist preview URL]")
+            if cookies and not session_reported and line.startswith(("YTDL|", "YTDL_FILE|")):
+                emit("youtube_session", status=YOUTUBE_SESSION_ACCEPTED)
+                session_reported = True
             if line.startswith("YTDL_FILE|"):
                 path = json.loads(line.partition("|")[2])
                 if isinstance(path, str) and Path(path).is_file():
