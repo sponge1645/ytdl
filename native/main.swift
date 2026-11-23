@@ -513,13 +513,20 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
         table.rowHeight = 58
         table.usesAlternatingRowBackgroundColors = false
+        table.allowsColumnReordering = false
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
         for (key, label, width) in [("title", "Title", 335.0), ("format", "Format", 58.0),
-                                     ("status", "Status", 155.0), ("action", "", 78.0)] {
+                                     ("status", "Status", 112.0), ("action", "", 78.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(key))
             column.title = localized(label)
             column.width = CGFloat(width)
-            if key == "title" { column.resizingMask = .autoresizingMask }
+            if key == "title" {
+                column.resizingMask = .autoresizingMask
+            } else if key == "action" {
+                column.resizingMask = []
+                column.minWidth = CGFloat(width)
+                column.maxWidth = CGFloat(width)
+            }
             table.addTableColumn(column)
         }
         let scroll = NSScrollView()
@@ -2119,8 +2126,18 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             badgeRow.alignment = .centerY
             return centeredCell(badgeRow)
         case "status":
+            if item.done {
+                let check = NSTextField(labelWithString: "✓")
+                check.font = .systemFont(ofSize: 15, weight: .semibold)
+                check.textColor = .systemGreen
+                check.toolTip = localized("Done")
+                check.setAccessibilityLabel(localized("Done"))
+                return centeredCell(check)
+            }
             let label = NSTextField(labelWithString: localized(item.status))
-            label.textColor = item.done ? .systemGreen : (item.status == "Error" ? .systemRed : .labelColor)
+            label.textColor = item.status == "Error" ? .systemRed : .labelColor
+            label.lineBreakMode = .byTruncatingTail
+            label.toolTip = label.stringValue
             if let progress = item.progress {
                 let bar = NSProgressIndicator()
                 bar.controlSize = .small
@@ -2143,7 +2160,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             let label = rowActionTitle(item)
             let appearance: (String, String, NSImage.Name?)
             if item.done {
-                appearance = ("✓", "checkmark.circle", NSImage.statusAvailableName)
+                appearance = ("📁", "folder", NSImage.folderName)
             } else if label == "Pause" {
                 appearance = ("Ⅱ", "pause", nil)
             } else {
