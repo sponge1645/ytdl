@@ -1,19 +1,15 @@
 import AppKit
 
 final class MusicPreview {
-    private var task: Process?
-    private var pendingInput: FileHandle?
-    private var expectedState: String?
+    private var pendingInputs: [String: FileHandle] = [:]
 
     static var script: URL? {
         Bundle.main.url(forResource: "music-track-smoke", withExtension: "py")
     }
 
     func stop() {
-        pendingInput?.closeFile()
-        pendingInput = nil
-        expectedState = nil
-        if let task = task, task.isRunning { task.terminate() }
+        for input in pendingInputs.values { input.closeFile() }
+        pendingInputs.removeAll()
     }
 
     static func normalizedLink(_ link: String) -> String {
@@ -36,6 +32,7 @@ final class MusicPreview {
 
     func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false, trackJSON: String? = nil,
              status: @escaping (String) -> Void,
+             log: @escaping (String) -> Void = { _ in },
              event: @escaping (String, Data) -> Void,
              finish: @escaping (Int32, String) -> Void) -> Process? {
         guard let script = Self.script else { return nil }
@@ -56,7 +53,6 @@ final class MusicPreview {
         } catch {
             return nil
         }
-        if !inspect { task = worker }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var buffer = Data()
             var lastLine = ""
@@ -75,12 +71,13 @@ final class MusicPreview {
                             self?.beginVerification(payload, input: input.fileHandleForWriting, status: status)
                         }
                     } else if let split = line.firstIndex(of: " "),
-                              line.hasPrefix("YTDL_METADATA ") || line.hasPrefix("YTDL_FILE ") {
+                              line.hasPrefix("YTDL_METADATA ") || line.hasPrefix("YTDL_FILE ") || line.hasPrefix("YTDL_PROGRESS ") {
                         let kind = String(line[..<split])
                         let payload = Data(line[line.index(after: split)...].utf8)
                         DispatchQueue.main.async { event(kind, payload) }
                     } else if !line.isEmpty {
                         lastLine = line
+                        DispatchQueue.main.async { log(line) }
                         if line.hasPrefix("Searching ") {
                             DispatchQueue.main.async { status(line) }
                         }
@@ -90,12 +87,7 @@ final class MusicPreview {
             worker.waitUntilExit()
             let message = buffer.isEmpty ? lastLine : String(decoding: buffer, as: UTF8.self)
             DispatchQueue.main.async {
-                if !inspect {
-                    self?.pendingInput?.closeFile()
-                    self?.pendingInput = nil
-                    self?.expectedState = nil
-                    self?.task = nil
-                }
+                self?.closeVerification(input.fileHandleForWriting)
                 finish(worker.terminationStatus, message)
             }
         }
@@ -110,36 +102,35 @@ final class MusicPreview {
             input.closeFile()
             return
         }
-        pendingInput = input
-        expectedState = state
+        pendingInputs[state] = input
         status("Complete music verification in your browser…")
         if !NSWorkspace.shared.open(url) {
-            stop()
+            closeVerification(input)
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self] in
-            guard let self = self, self.expectedState == state else { return }
-            self.pendingInput?.closeFile()
-            self.pendingInput = nil
-            self.expectedState = nil
+            self?.closeVerification(input)
         }
     }
 
+    private func closeVerification(_ input: FileHandle) {
+        guard let state = pendingInputs.first(where: { $0.value === input })?.key else { return }
+        pendingInputs.removeValue(forKey: state)?.closeFile()
+    }
+
     func acceptVerification(_ url: URL) {
-        guard let input = pendingInput, let expected = expectedState,
-              task?.isRunning == true,
-              let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               parts.scheme == "mornye", parts.host == "session-grant",
               parts.path.isEmpty, parts.user == nil, parts.password == nil,
               parts.port == nil, parts.fragment == nil,
               let items = parts.queryItems,
-              items.filter({ $0.name == "state" }).map({ $0.value }) == [expected],
+              items.filter({ $0.name == "state" }).count == 1,
+              let state = items.first(where: { $0.name == "state" })?.value,
+              let input = pendingInputs[state],
               items.filter({ $0.name == "grant" }).count == 1,
               let grant = items.first(where: { $0.name == "grant" })?.value, !grant.isEmpty else { return }
-        pendingInput = nil
-        expectedState = nil
         try? input.write(contentsOf: Data((url.absoluteString + "\n").utf8))
-        input.closeFile()
+        closeVerification(input)
         NSApp.activate(ignoringOtherApps: true)
     }
 

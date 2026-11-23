@@ -399,8 +399,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         table.rowHeight = 58
         table.usesAlternatingRowBackgroundColors = false
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
-        for (key, label, width) in [("title", "Title", 300.0), ("format", "Format", 58.0),
-                                     ("status", "Status", 190.0), ("action", "", 78.0)] {
+        for (key, label, width) in [("title", "Title", 335.0), ("format", "Format", 58.0),
+                                     ("status", "Status", 155.0), ("action", "", 78.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(key))
             column.title = localized(label)
             column.width = CGFloat(width)
@@ -1458,7 +1458,6 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         var remaining = available
         for item in downloads where item.scheduled && !item.pendingRemoval && item.process == nil {
             guard remaining > 0 else { break }
-            if item.music && downloads.contains(where: { $0.music && $0.startedMode != nil && $0.process != nil }) { continue }
             begin(item)
             remaining -= 1
         }
@@ -1540,8 +1539,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private func beginMusic(_ item: Download, format: String) {
         item.scheduled = false
         item.status = "Connecting…"
+        item.progress = 0
         item.lastError = ""
         let source = effectiveSource(for: item)
+        appendLog("Music · " + item.title + " · " + source + " · " + format)
         item.process = musicPreview.run(link: item.url, folder: outputFolder(for: "audio_folder"),
                                         source: source, format: format, trackJSON: item.musicTrackJSON,
                                         status: { [weak self, weak item] message in
@@ -1549,19 +1550,30 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             self.status.stringValue = message
             item.status = "Downloading"
             self.refresh()
-        }, event: { [weak item] kind, data in
+        }, log: { [weak self] message in
+            self?.appendLog("Music · " + message)
+        }, event: { [weak self, weak item] kind, data in
+            if kind == "YTDL_PROGRESS", let item = item, item.status != "Paused",
+               let percent = try? JSONDecoder().decode(Double.self, from: data) {
+                item.status = "Downloading"
+                item.progress = percent
+                self?.refresh()
+            }
             if kind == "YTDL_FILE", let path = try? JSONDecoder().decode(String.self, from: data) {
                 item?.files = [URL(fileURLWithPath: path)]
             }
         }, finish: { [weak self, weak item] code, message in
             guard let self = self, let item = item else { return }
             item.process = nil
+            item.progress = nil
             if item.pendingRemoval {
                 self.delete(item, trashFile: false)
             } else if item.status != "Paused" || !item.files.isEmpty {
                 item.done = code == 0 && !item.files.isEmpty
                 item.status = item.done ? "Done" : "Error"
                 item.lastError = item.done ? "" : message
+                self.appendLog("Music · " + item.status + " · " + item.title)
+                if !item.done { self.unlockMusicOptions(item) }
                 self.status.stringValue = item.lastError
                 self.notify(item.done ? "Download completed" : "Download failed", body: item.title,
                             setting: item.done ? "notify_completed" : "notify_failed", enabledByDefault: true)
@@ -1570,10 +1582,20 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             if item.done { self.finishQueueIfNeeded(last: item) }
         })
         if item.process == nil {
+            item.progress = nil
             item.status = "Error"
+            unlockMusicOptions(item)
             status.stringValue = "Could not launch the music engine."
         } else {
             notify("Download started", body: item.title, setting: "notify_started")
+        }
+    }
+
+    private func unlockMusicOptions(_ item: Download) {
+        item.startedMode = nil
+        if musicSelection === item {
+            quality.isEnabled = true
+            musicSource.isEnabled = true
         }
     }
 

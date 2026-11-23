@@ -58,6 +58,10 @@ class Engine:
         self.lib.mornye_cancel.argtypes = [ctypes.c_uint64]
         for name in ("init", "call", "cancel", "free"):
             getattr(self.lib, "mornye_" + name).restype = None
+        self.lib.mornye_subscribe.argtypes = [ctypes.c_int32]
+        self.lib.mornye_subscribe.restype = None
+        self.progress_item = None
+        self.last_percent = -1
         self.replies = queue.Queue()
         self.ids = itertools.count(1)
         self.callback = CALLBACK(self.receive)
@@ -73,6 +77,16 @@ class Engine:
         try:
             if call_id and kind in (0, 1, 2):
                 self.replies.put((call_id, kind, ctypes.string_at(data, length)))
+            elif kind == 10 and self.progress_item and data:
+                payload = json.loads(ctypes.string_at(data, length))
+                item = payload.get("items", {}).get(self.progress_item, {})
+                if item.get("bytes_total", 0) > 0 or item.get("progress", 0) > 0:
+                    percent = min(100, max(0, int(item["progress"] * 100)))
+                    if percent != self.last_percent:
+                        self.last_percent = percent
+                        print(f"YTDL_PROGRESS {percent}", flush=True)
+        except (ValueError, TypeError, KeyError):
+            pass
         finally:
             if data:
                 self.lib.mornye_free(data, length)
@@ -175,7 +189,8 @@ def metadata_provider(url):
 
 
 TRACK_FIELDS = ("id", "spotify_id", "name", "artists", "isrc", "duration_ms", "album_name", "cover_url",
-                "track_number", "disc_number", "total_tracks", "total_discs")
+                "track_number", "disc_number", "total_tracks", "total_discs",
+                "album_artist", "release_date", "genre", "composer", "copyright")
 
 
 def track_metadata(track, fallback_cover=""):
@@ -286,21 +301,71 @@ def finalize_flac(path, descriptor):
     return destination
 
 
-def run(args, home, master_key):
+def write_metadata(source, destination, track, codec):
+    command = [media_tool("ffmpeg"), "-nostdin", "-v", "error", "-xerror", "-y", "-i", str(source)]
+    cover = destination.parent / "streaming-cover"
+    cover_url = track.get("cover_url")
+    if isinstance(cover_url, str) and urlsplit(cover_url).scheme == "https":
+        try:
+            with urlopen(cover_url, timeout=15) as response:
+                data = response.read(12 * 1024 * 1024 + 1)
+            if len(data) <= 12 * 1024 * 1024:
+                cover.write_bytes(data)
+        except OSError:
+            print("The streaming service cover could not be fetched.", flush=True)
+    mapping = ["-map", "0:a:0", "-map", "0:v:0?"]
+    if cover.is_file():
+        command += ["-i", str(cover)]
+        mapping = ["-map", "0:a:0", "-map", "1:v:0"]
+    tags = {
+        "title": track["name"], "artist": track["artists"], "album": track.get("album_name"),
+        "album_artist": track.get("album_artist"), "date": track.get("release_date"),
+        "genre": track.get("genre"), "composer": track.get("composer"),
+        "copyright": track.get("copyright"), "ISRC": track.get("isrc"),
+    }
+    for tag, field, total_field in (("track", "track_number", "total_tracks"),
+                                    ("disc", "disc_number", "total_discs")):
+        number = track.get(field)
+        if type(number) is int and number > 0:
+            total = track.get(total_field)
+            tags[tag] = f"{number}/{total}" if type(total) is int and total >= number else str(number)
+    metadata = [arg for key, value in tags.items() if isinstance(value, str) and value
+                for arg in ("-metadata", f"{key}={value.replace(chr(0), '')}")]
+    options = ["-f", "mp4"] if destination.suffix in {".mp4", ".m4a"} else []
+    picture = ["-c:v", "mjpeg" if cover.is_file() else "copy", "-disposition:v:0", "attached_pic"]
+    result = subprocess.run(command + mapping + codec + picture + metadata + options + [str(destination)],
+                            capture_output=True, timeout=120)
+    if result.returncode:
+        print("Could not embed the cover; saving the audio and tags.", flush=True)
+        subprocess.run(command[:command.index("-i") + 2] + ["-map", "0:a:0"] + codec + metadata
+                       + options + [str(destination)], capture_output=True, check=True, timeout=120)
+    return destination
+
+
+def run(args, home):
     provider = metadata_provider(args.url)
     library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    engine = Engine(library.resolve(), home)
-    engine.call("initExtensionSystem", {
-        "extensions_dir": str(home / "extensions"),
-        "data_dir": str(home / "data"),
-        "master_key": master_key,
-        "allowed_directories": [str(output)],
-    })
-    engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
-    if not args.track_json:
-        install_package(engine, home, provider)
+    service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
+    package, quality, label = DOWNLOADERS[service]
+    with (home / ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        key_path = home / "storage-key"
+        if not key_path.exists():
+            key_path.write_text(base64.b64encode(secrets.token_bytes(32)).decode())
+        engine = Engine(library.resolve(), home)
+        engine.call("initExtensionSystem", {
+            "extensions_dir": str(home / "extensions"),
+            "data_dir": str(home / "data"),
+            "master_key": key_path.read_text().strip(),
+            "allowed_directories": [str(output)],
+        })
+        engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
+        if not args.track_json:
+            install_package(engine, home, provider)
+        if not args.inspect and (args.track_json or package != provider):
+            install_package(engine, home, package)
     if args.track_json:
         track = track_metadata(json.loads(args.track_json))
         if not track:
@@ -315,8 +380,6 @@ def run(args, home, master_key):
         track = tracks[0]
     cover = track["cover_url"]
     engine.call("setDownloadDirectory", {"path": str(output)})
-    service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
-    package, quality, label = DOWNLOADERS[service]
     dolby = DOLBY_FORMATS.get(args.format)
     compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and args.format == "M4A")
     if compressed and args.format not in {"M4A", "MP3"}:
@@ -332,8 +395,6 @@ def run(args, home, master_key):
         required_source, quality, extension, expected_codec = dolby
         if service != required_source:
             raise RuntimeError("The selected Dolby format is unavailable from this source.")
-    if args.track_json or package != provider:
-        install_package(engine, home, package)
     print(f"Searching {label} for {track['artists']} — {track['name']}", flush=True)
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
     stem = " ".join(stem.split()).strip(". ")
@@ -356,6 +417,9 @@ def run(args, home, master_key):
         value = track.get(field)
         if type(value) is int and value > 0:
             request[field] = value
+    if args.gui:
+        engine.progress_item = request["item_id"]
+        engine.lib.mornye_subscribe(10)
     result = engine.call("downloadByStrategy", json.dumps(request))
     if isinstance(result, dict) and result.get("error_type") == "verification_required":
         verify(engine, service, args.gui)
@@ -398,16 +462,14 @@ def run(args, home, master_key):
         if not header.startswith(b"fLaC"):
             raise RuntimeError(f"{label} returned a file without a FLAC header (format: {actual}): {path}")
     if args.gui:
-        if args.format in {"MP3", "M4A"}:
-            converted = output / f"converted.{args.format.lower()}"
-            aac_codec = ["-c:a", "copy"] if compressed and input_codec == "aac" else ["-c:a", "aac", "-b:a", "256k"]
-            codec = aac_codec if args.format == "M4A" else [
-                "-c:a", "libmp3lame", "-b:a", "320k",
-            ]
-            subprocess.run([media_tool("ffmpeg"), "-nostdin", "-v", "error", "-xerror",
-                            "-i", str(path), "-map", "0:a:0", *codec, str(converted)],
-                           check=True, timeout=120)
-            path = converted
+        codec = ["-c:a", "copy"]
+        if args.format == "MP3":
+            codec = ["-c:a", "libmp3lame", "-b:a", "320k"]
+        elif args.format == "M4A" and not (compressed and input_codec == "aac"):
+            codec = ["-c:a", "aac", "-b:a", "256k"]
+        extension = "." + args.format.lower() if args.format in {"MP3", "M4A"} else extension
+        print(f"Writing metadata: {track['artists']} — {track['name']}", flush=True)
+        path = write_metadata(path, output / ("tagged" + extension), track, codec)
         suffix = path.suffix.lower()
         for number in itertools.count(1):
             name = stem if number == 1 else f"{stem} ({number})"
@@ -441,24 +503,14 @@ if __name__ == "__main__":
         os.umask(0o077)
         home = Path.home() / "Library/Application Support/YTDL/Music Preview"
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with (home / ".lock").open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-            except BlockingIOError:
-                raise RuntimeError("Another music download is already running.") from None
-            key_path = home / "storage-key"
-            if not key_path.exists():
-                key_path.write_text(base64.b64encode(secrets.token_bytes(32)).decode())
-            if args.gui:
-                folder = args.output.resolve()
-                if args.inspect:
-                    folder = home
-                folder.mkdir(parents=True, exist_ok=True)
-                with tempfile.TemporaryDirectory(prefix=".ytdl-music-", dir=folder) as staging:
-                    args.output = Path(staging)
-                    run(args, home, key_path.read_text().strip())
-            else:
-                run(args, home, key_path.read_text().strip())
+        if args.gui:
+            folder = home if args.inspect else args.output.resolve()
+            folder.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".ytdl-music-", dir=folder) as staging:
+                args.output = Path(staging)
+                run(args, home)
+        else:
+            run(args, home)
     except subprocess.TimeoutExpired:
         parser.exit(1, "FFmpeg finalization timed out. The original was kept.\n")
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:

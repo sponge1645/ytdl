@@ -33,7 +33,7 @@ final class NativePreferences: NSObject {
         prefs[automaticAppUpdateKey] as? Bool != false
     }
 
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 370),
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
     private let saved: () -> Void
     private let engineAction: (String, @escaping (String) -> Void) -> Void
@@ -134,7 +134,8 @@ final class NativePreferences: NSObject {
             row("Video folder", videoFolder, trailing: videoChooser),
             row("Audio folder", audioFolder, trailing: audioChooser),
             row("Parallel downloads", parallel), auto,
-            autoCheckApp, autoUpdate, row("After all downloads finish", afterQueue)
+            autoCheckApp, autoUpdate, row("After all downloads finish", afterQueue),
+            numbering, row("Number separator", separator)
         ])
         addTab("Notifications", to: tabs, with: notificationButtons.map { $0 as NSView })
         let formatsRow = NSStackView(views: [mp4, webm, flv])
@@ -146,7 +147,6 @@ final class NativePreferences: NSObject {
             row("Proxy", proxy), row("Speed limit (KiB/s)", rate),
             NSTextField(labelWithString: localized("Set the speed limit to 0 for unlimited."))
         ])
-        addTab("Filenames", to: tabs, with: [numbering, row("Number separator", separator)])
 
         let check = NSButton(title: localized("Check Tools Now"), target: self, action: #selector(checkTools))
         let clean = NSButton(title: localized("Clean Old Kits"), target: self, action: #selector(cleanTools))
