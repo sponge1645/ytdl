@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 import queue
 import secrets
+import shutil
+import re
 import subprocess
 import tempfile
 from urllib.parse import parse_qs, urlsplit
@@ -134,6 +136,50 @@ def resolve_track(engine, url):
     return track
 
 
+def ffmpeg_path():
+    root = Path.home() / "Library/Application Support/YTDL/tool-kits-v1"
+    current = root / "current"
+    version = current.read_text().strip() if current.is_file() else ""
+    if version.isascii() and version.isdecimal():
+        bundled = root / version / "bin/ffmpeg"
+        if bundled.is_file():
+            return str(bundled)
+    executable = shutil.which("ffmpeg")
+    if executable:
+        return executable
+    raise RuntimeError("FFmpeg is missing. Open YTDL to install the tools or put FFmpeg on PATH.")
+
+
+def finalize_flac(path, descriptor):
+    if descriptor.get("strategy") != "ffmpeg.mov_key":
+        raise RuntimeError("Amazon returned an unsupported finalization type.")
+    key = descriptor.get("key", "")
+    if not isinstance(key, str):
+        raise RuntimeError("Amazon did not return a usable finalization key.")
+    key = key.strip().removeprefix("0x")
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", key):
+        raise RuntimeError("Amazon did not return a usable finalization key.")
+    ffmpeg = ffmpeg_path()
+    destination = path.with_suffix(".flac")
+    with tempfile.TemporaryDirectory(prefix=".ytdl-finalize-", dir=path.parent) as work:
+        staged = Path(work) / "audio.flac"
+        commands = [
+            [ffmpeg, "-nostdin", "-v", "error", "-decryption_key", key, "-f", "mov",
+             "-i", str(path), "-map", "0:a:0", "-c:a", "copy", "-f", "flac", str(staged)],
+            [ffmpeg, "-nostdin", "-v", "error", "-xerror", "-i", str(staged),
+             "-map", "0:a:0", "-f", "null", "-"],
+        ]
+        for command in commands:
+            completed = subprocess.run(command, capture_output=True, timeout=120)
+            if completed.returncode:
+                raise RuntimeError("FFmpeg could not finalize or decode the FLAC. The original was kept.")
+        if destination == path:
+            staged.replace(destination)
+        else:
+            destination.hardlink_to(staged)
+    return destination
+
+
 def run(args, home):
     provider = metadata_provider(args.url)
     library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
@@ -178,6 +224,9 @@ def run(args, home):
     path = path.resolve()
     if output not in path.parents or not path.is_file():
         raise RuntimeError(f"The file reported by the engine is unavailable: {path} (format: {actual}).")
+    descriptor = result.get("decryption")
+    if isinstance(descriptor, dict) and descriptor.get("key"):
+        path = finalize_flac(path, descriptor)
     with path.open("rb") as audio:
         header = audio.read(10)
         if header.startswith(b"ID3") and len(header) == 10 and all(n < 128 for n in header[6:10]):
@@ -202,5 +251,7 @@ if __name__ == "__main__":
     try:
         with tempfile.TemporaryDirectory(prefix="ytdl-music-") as home:
             run(args, Path(home))
+    except subprocess.TimeoutExpired:
+        parser.exit(1, "FFmpeg finalization timed out. The original was kept.\n")
     except (OSError, RuntimeError, ValueError) as error:
         parser.exit(1, f"{error}\n")
