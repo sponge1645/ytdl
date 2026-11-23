@@ -146,6 +146,7 @@ def run(args, home):
         "master_key": base64.b64encode(secrets.token_bytes(32)).decode(),
         "allowed_directories": [str(output)],
     })
+    engine.call("setDownloadDirectory", {"path": str(output)})
     install_package(engine, home, provider)
     install_package(engine, home, "amzn")
     track = resolve_track(engine, args.url)
@@ -155,7 +156,8 @@ def run(args, home):
         "track_name": track["name"], "artist_name": track["artists"],
         "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
         "album_name": track.get("album_name") or "",
-        "output_dir": str(output), "output_ext": "flac",
+        "output_dir": str(output), "output_path": str(output / "track.flac"),
+        "output_ext": ".flac",
         "quality": "best", "item_id": str(uuid4()), "use_extensions": True,
         "use_fallback": False, "embed_metadata": True,
     }
@@ -166,12 +168,27 @@ def run(args, home):
     if not isinstance(result, dict) or result.get("success") is not True:
         reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
         raise RuntimeError(f"Amazon Music did not complete the test download ({reason}).")
-    for path in output.rglob("*.flac"):
-        with path.open("rb") as audio:
-            if audio.read(4) == b"fLaC":
-                print(f"Saved FLAC: {path}")
-                return
-    raise RuntimeError("The engine reported success without a readable FLAC file.")
+    reported = result.get("file_path")
+    actual = result.get("actual_extension") or "unknown"
+    if not isinstance(reported, str) or not reported:
+        raise RuntimeError(f"The engine reported success without a file path (format: {actual}).")
+    path = Path(reported)
+    if not path.is_absolute():
+        path = output / path
+    path = path.resolve()
+    if output not in path.parents or not path.is_file():
+        raise RuntimeError(f"The file reported by the engine is unavailable: {path} (format: {actual}).")
+    with path.open("rb") as audio:
+        header = audio.read(10)
+        if header.startswith(b"ID3") and len(header) == 10 and all(n < 128 for n in header[6:10]):
+            size = 0
+            for byte in header[6:10]:
+                size = (size << 7) | byte
+            audio.seek(10 + size + (10 if header[3] == 4 and header[5] & 16 else 0))
+            header = audio.read(4)
+    if not header.startswith(b"fLaC"):
+        raise RuntimeError(f"Amazon returned a file without a FLAC header (format: {actual}): {path}")
+    print(f"Saved FLAC: {path}")
 
 
 if __name__ == "__main__":
