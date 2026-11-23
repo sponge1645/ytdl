@@ -55,7 +55,7 @@ def is_instagram(url):
 
 
 def download_command(executable, folder, mode, url, preferences, index=None,
-                     restart=False, temporary=None, *, convert=False):
+                     restart=False, temporary=None, *, convert=False, preview=None):
     if mode == "Лучшее видео":
         mode = "best"
     if mode not in (*VIDEO, *AUDIO):
@@ -73,11 +73,19 @@ def download_command(executable, folder, mode, url, preferences, index=None,
     if temporary is not None:
         command += ["-P", f"temp:{temporary}"]
     command += ["--force-overwrites", "--no-continue"] if restart else ["--continue"]
+    if preview:
+        title, referer, video = preview
+        title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", title).strip(". ")
+        title = title.encode("utf-8")[:150].decode("utf-8", errors="ignore").rstrip(". ") or "Artlist preview"
+        command[command.index("-o") + 1] = title.replace("%", "%%") + ".%(ext)s"
+        command += ["--referer", referer]
+        if video:
+            command += ["--remux-video", "mp4"]
     if mode in AUDIO:
         if mode == "MP3":
             command += ["-f", "bestaudio/best"]
         command += ["-x", "--audio-format", mode.lower(), "--audio-quality", "320K" if mode == "MP3" else "0"]
-    else:
+    elif not preview:
         limit = "" if mode == "best" else f"[height<={mode[:-1]}]"
         output_mode = preferences.get("video_output", "auto")
         if output_mode == "original":

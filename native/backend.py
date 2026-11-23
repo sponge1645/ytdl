@@ -10,6 +10,7 @@ import sys
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from artlist_preview import ARTLIST_ROOT, artlist_asset, resolve_artlist
 from dependencies import BIN_DIR, install_missing, tool_path
 from download_core import AUDIO, download_command, is_instagram, read_preferences as read_file_preferences, redact_credentials
 
@@ -57,6 +58,10 @@ def proxy_config(command, proxy):
 
 
 def inspect(url):
+    if artlist_asset(url):
+        _, title = resolve_artlist(url, read_preferences()["proxy"])
+        emit("items", items=[{"url": url, "title": title}])
+        return
     if is_instagram(url):
         emit("items", items=[{"url": url, "title": "Instagram"}])
         return
@@ -142,13 +147,20 @@ def download(request):
     executable = tool_path("yt-dlp")
     if not executable:
         raise RuntimeError("Download tools are still being installed.")
-    if instagram_video and mode in AUDIO:
-        mode = "best"
-    options = dict(index=request.get("index"), temporary=temp)
-    args = executable, folder, mode, url, prefs
-    commands = [download_command(*args, **options)]
-    if mode not in AUDIO and prefs["video_output"] == "auto":
-        commands.append(download_command(*args, **options, convert=True))
+    artlist = artlist_asset(url)
+    if artlist:
+        media_url, title = resolve_artlist(url, prefs["proxy"])
+        mode = mode if artlist[0] != "clip" and mode in AUDIO else "best"
+        commands = [download_command(executable, folder, mode, media_url, prefs, temporary=temp,
+                                     preview=(title, ARTLIST_ROOT, artlist[0] == "clip"))]
+    else:
+        if instagram_video and mode in AUDIO:
+            mode = "best"
+        options = dict(index=request.get("index"), temporary=temp)
+        args = executable, folder, mode, url, prefs
+        commands = [download_command(*args, **options)]
+        if mode not in AUDIO and prefs["video_output"] == "auto":
+            commands.append(download_command(*args, **options, convert=True))
 
     for attempt, command in enumerate(commands):
         config = proxy_config(command, prefs['proxy'])
@@ -179,6 +191,8 @@ def download(request):
         emit("log", status=f"Starting {Path(command[0]).name} (attempt {attempt + 1})")
         for line in child.stdout:
             line = line.strip()
+            if artlist:
+                line = line.replace(media_url, "[Artlist preview URL]")
             if line.startswith("YTDL_FILE|"):
                 path = json.loads(line.partition("|")[2])
                 if isinstance(path, str) and Path(path).is_file():

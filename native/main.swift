@@ -1642,7 +1642,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             beginMusic(item, format: selectedMode)
             return
         }
-        let audio = ["MP3", "M4A"].contains(selectedMode) && !item.url.contains("instagram.com/")
+        let link = URL(string: item.url)
+        let artlist = ["artlist.io", "www.artlist.io"].contains(link?.host?.lowercased() ?? "")
+        let path = link?.path ?? ""
+        let audio = artlist ? !path.hasPrefix("/stock-footage/clip/") :
+            ["MP3", "M4A"].contains(selectedMode) && !item.url.contains("instagram.com/")
         let destination = outputFolder(for: audio ? "audio_folder" : "video_folder")
         let engineMode = selectedMode == "best" && !engineUsesModeKeys ? "Лучшее видео" : selectedMode
         var request: [String: Any] = ["url": item.url, "mode": engineMode, "folder": destination.path,
