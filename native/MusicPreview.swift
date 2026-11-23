@@ -16,56 +16,37 @@ final class MusicPreview {
         if let task = task, task.isRunning { task.terminate() }
     }
 
-    func show(defaultFolder: URL, initialURL: String = "", status: @escaping (String) -> Void) {
-        guard task == nil, let script = Self.script else { return }
-        let dialog = NSAlert()
-        dialog.messageText = "Download music"
-        dialog.informativeText = "Paste a single-track link and select a lossless audio source."
-        let link = NSTextField(frame: NSRect(x: 0, y: 42, width: 420, height: 25))
-        link.placeholderString = "https://…"
-        link.stringValue = initialURL
-        let source = NSPopUpButton(frame: NSRect(x: 0, y: 4, width: 220, height: 27))
-        source.addItems(withTitles: ["Automatic", "Amazon Music", "Tidal", "Qobuz", "Deezer"])
-        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 70))
-        fields.addSubview(link)
-        fields.addSubview(source)
-        dialog.accessoryView = fields
-        dialog.addButton(withTitle: "Choose Folder…")
-        dialog.addButton(withTitle: "Cancel")
-        dialog.window.initialFirstResponder = link
-        guard dialog.runModal() == .alertFirstButtonReturn else { return }
-        let value = link.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: value), url.scheme == "https", url.host != nil else {
-            notify("Enter a valid HTTPS track link.")
-            return
-        }
-        let picker = NSOpenPanel()
-        picker.canChooseDirectories = true
-        picker.canChooseFiles = false
-        picker.canCreateDirectories = true
-        picker.directoryURL = defaultFolder
-        guard picker.runModal() == .OK, let folder = picker.url else { return }
-        let output = folder.appendingPathComponent("YTDL Music " + String(UUID().uuidString.prefix(8)))
+    static func accepts(_ link: String) -> Bool {
+        guard let url = URL(string: link), url.scheme == "https", let host = url.host else { return false }
+        return ["open.spotify.com", "music.apple.com", "tidal.com", "www.tidal.com", "listen.tidal.com",
+                "qobuz.com", "www.qobuz.com", "play.qobuz.com", "open.qobuz.com",
+                "deezer.com", "www.deezer.com", "link.deezer.com", "deezer.page.link"].contains(host)
+            || ["com", "co.uk", "de", "co.jp", "fr", "it", "es", "in", "com.br", "com.mx", "com.au", "co"]
+                .contains { host == "music.amazon." + $0 }
+    }
+
+    func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false,
+             status: @escaping (String) -> Void,
+             event: @escaping (String, Data) -> Void,
+             finish: @escaping (Int32, String) -> Void) -> Process? {
+        guard let script = Self.script else { return nil }
         let worker = Process()
         let pipe = Pipe()
         let input = Pipe()
         worker.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        worker.arguments = ["-u", script.path, Bundle.main.bundlePath, value, output.path, "--gui"]
-        let keys = ["", "amazon", "tidal-web", "qobuz-web", "deezer"]
-        if source.indexOfSelectedItem > 0 {
-            worker.arguments?.append(contentsOf: ["--source", keys[source.indexOfSelectedItem]])
-        }
+        var arguments = ["-u", script.path, Bundle.main.bundlePath, link, folder.path, "--gui", "--format", format]
+        if let source = source { arguments += ["--source", source] }
+        if inspect { arguments.append("--inspect") }
+        worker.arguments = arguments
         worker.standardOutput = pipe
         worker.standardError = pipe
         worker.standardInput = input
         do {
             try worker.run()
         } catch {
-            notify("Could not launch the music engine. Python 3 from Command Line Tools is required.")
-            return
+            return nil
         }
-        task = worker
-        status("Preparing music download…")
+        if !inspect { task = worker }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var buffer = Data()
             var lastLine = ""
@@ -83,6 +64,11 @@ final class MusicPreview {
                             guard worker.isRunning else { return }
                             self?.beginVerification(payload, input: input.fileHandleForWriting, status: status)
                         }
+                    } else if let split = line.firstIndex(of: " "),
+                              line.hasPrefix("YTDL_METADATA ") || line.hasPrefix("YTDL_FILE ") {
+                        let kind = String(line[..<split])
+                        let payload = Data(line[line.index(after: split)...].utf8)
+                        DispatchQueue.main.async { event(kind, payload) }
                     } else if !line.isEmpty {
                         lastLine = line
                         if line.hasPrefix("Searching ") {
@@ -92,18 +78,18 @@ final class MusicPreview {
                 }
             }
             worker.waitUntilExit()
-            let succeeded = worker.terminationStatus == 0
-            let message = lastLine
+            let message = buffer.isEmpty ? lastLine : String(decoding: buffer, as: UTF8.self)
             DispatchQueue.main.async {
-                self?.pendingInput?.closeFile()
-                self?.pendingInput = nil
-                self?.expectedState = nil
-                self?.task = nil
-                status(succeeded ? "Music download complete" : "Music download failed")
-                self?.notify(message.isEmpty ? "Music process exited with code \(worker.terminationStatus)." : message,
-                             folder: succeeded ? output : nil)
+                if !inspect {
+                    self?.pendingInput?.closeFile()
+                    self?.pendingInput = nil
+                    self?.expectedState = nil
+                    self?.task = nil
+                }
+                finish(worker.terminationStatus, message)
             }
         }
+        return worker
     }
 
     private func beginVerification(_ payload: Data, input: FileHandle, status: (String) -> Void) {
@@ -147,14 +133,4 @@ final class MusicPreview {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func notify(_ message: String, folder: URL? = nil) {
-        let alert = NSAlert()
-        alert.messageText = folder == nil ? "Music download" : "Music download complete"
-        alert.informativeText = message
-        alert.addButton(withTitle: folder == nil ? "OK" : "Show in Finder")
-        if folder != nil { alert.addButton(withTitle: "Close") }
-        if alert.runModal() == .alertFirstButtonReturn, let folder = folder {
-            NSWorkspace.shared.open(folder)
-        }
-    }
 }

@@ -190,7 +190,7 @@ def finalize_flac(path, descriptor):
     key = descriptor.get("key", "")
     if not isinstance(key, str):
         raise RuntimeError("Amazon did not return a usable finalization key.")
-    key = key.strip().removeprefix("0x")
+    key = re.sub(r"^0x", "", key.strip())
     if not re.fullmatch(r"[0-9a-fA-F]{32}", key):
         raise RuntimeError("Amazon did not return a usable finalization key.")
     ffmpeg = ffmpeg_path()
@@ -210,7 +210,7 @@ def finalize_flac(path, descriptor):
         if destination == path:
             staged.replace(destination)
         else:
-            destination.hardlink_to(staged)
+            os.link(staged, destination)
     return destination
 
 
@@ -226,14 +226,20 @@ def run(args, home, master_key):
         "master_key": master_key,
         "allowed_directories": [str(output)],
     })
-    engine.call("setDownloadDirectory", {"path": str(output)})
     engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
     install_package(engine, home, provider)
+    track = resolve_track(engine, args.url)
+    cover = track.get("cover_url") or track.get("cover_art") or ""
+    if args.inspect:
+        print("YTDL_METADATA " + json.dumps({
+            "title": f"{track['artists']} — {track['name']}", "thumbnail": cover,
+        }))
+        return
+    engine.call("setDownloadDirectory", {"path": str(output)})
     service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
     package, quality, label = DOWNLOADERS[service]
     if package != provider:
         install_package(engine, home, package)
-    track = resolve_track(engine, args.url)
     print(f"Searching {label} for {track['artists']} — {track['name']}", flush=True)
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
     stem = " ".join(stem.split()).strip(". ")
@@ -242,7 +248,7 @@ def run(args, home, master_key):
         "contract_version": 1, "service": service, "download_provider": service,
         "track_name": track["name"], "artist_name": track["artists"],
         "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
-        "album_name": track.get("album_name") or "",
+        "album_name": track.get("album_name") or "", "cover_url": cover,
         "output_dir": str(output), "output_path": str(output / f"{stem}.flac"),
         "output_ext": ".flac",
         "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
@@ -265,6 +271,7 @@ def run(args, home, master_key):
     path = path.resolve()
     if output not in path.parents or not path.is_file():
         raise RuntimeError(f"The file reported by the engine is unavailable: {path} (format: {actual}).")
+    original = path
     descriptor = result.get("decryption")
     if isinstance(descriptor, dict) and descriptor.get("key"):
         path = finalize_flac(path, descriptor)
@@ -278,7 +285,30 @@ def run(args, home, master_key):
             header = audio.read(4)
     if not header.startswith(b"fLaC"):
         raise RuntimeError(f"{label} returned a file without a FLAC header (format: {actual}): {path}")
-    print(f"Saved FLAC: {path}")
+    if args.gui:
+        if args.format != "FLAC":
+            converted = output / f"converted.{args.format.lower()}"
+            codec = ["-c:a", "aac", "-b:a", "256k"] if args.format == "M4A" else [
+                "-c:a", "libmp3lame", "-b:a", "320k",
+            ]
+            subprocess.run([ffmpeg_path(), "-nostdin", "-v", "error", "-xerror",
+                            "-i", str(path), "-map", "0:a:0", *codec, str(converted)],
+                           check=True, timeout=120)
+            path = converted
+        suffix = path.suffix.lower()
+        for number in itertools.count(1):
+            name = stem if number == 1 else f"{stem} ({number})"
+            destination = args.output.resolve().parent / f"{name}{suffix}"
+            try:
+                os.link(path, destination)
+            except FileExistsError:
+                continue
+            break
+        print("YTDL_FILE " + json.dumps(str(destination)))
+    else:
+        if isinstance(descriptor, dict) and descriptor.get("key") and original != path:
+            original.unlink()
+        print(f"Saved FLAC: {path}")
 
 
 if __name__ == "__main__":
@@ -288,8 +318,10 @@ if __name__ == "__main__":
     parser.add_argument("--source", choices=DOWNLOADERS, help="Override the audio source")
     parser.add_argument("output", type=Path, help="New directory for the test download")
     parser.add_argument("--gui", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--inspect", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--format", choices=("FLAC", "M4A", "MP3"), default="FLAC")
     args = parser.parse_args()
-    if args.output.exists():
+    if args.output.exists() and not args.gui:
         parser.error("Choose a new output directory so the test cannot match an old file.")
     try:
         os.umask(0o077)
@@ -297,14 +329,23 @@ if __name__ == "__main__":
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (home / ".lock").open("a") as lock:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock, fcntl.LOCK_EX)
             except BlockingIOError:
                 raise RuntimeError("Another music download is already running.") from None
             key_path = home / "storage-key"
             if not key_path.exists():
                 key_path.write_text(base64.b64encode(secrets.token_bytes(32)).decode())
-            run(args, home, key_path.read_text().strip())
+            if args.gui:
+                folder = args.output.resolve()
+                if args.inspect:
+                    folder = home
+                folder.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix=".ytdl-music-", dir=folder) as staging:
+                    args.output = Path(staging)
+                    run(args, home, key_path.read_text().strip())
+            else:
+                run(args, home, key_path.read_text().strip())
     except subprocess.TimeoutExpired:
         parser.exit(1, "FFmpeg finalization timed out. The original was kept.\n")
-    except (OSError, RuntimeError, ValueError) as error:
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"{error}\n")

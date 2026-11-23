@@ -5,9 +5,12 @@ import UserNotifications
 private final class Download {
     let id = UUID()
     let url: String
-    let title: String
+    var title: String
     let index: Int?
     var startedMode: String?
+    var music = false
+    var musicFormat = "FLAC"
+    var musicSource = 0
     var status = "Waiting"
     var progress: Double?
     var image: NSImage?
@@ -100,6 +103,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     let empty = EmptyQueueView()
     let mode = NSSegmentedControl(labels: [localized("Video"), localized("Audio")], trackingMode: .selectOne, target: nil, action: nil)
     let quality = NSPopUpButton()
+    let musicSource = NSPopUpButton()
+    private weak var musicSelection: Download?
+    private var previousMode = 0
+    private var previousFormat = "best"
+    private let musicSources = ["", "amazon", "tidal-web", "qobuz-web", "deezer"]
     var showCompleted = false
     var sidebarSelection: [NSBox] = []
     let temp = FileManager.default.temporaryDirectory.appendingPathComponent("ytdl-native-" + UUID().uuidString)
@@ -155,10 +163,6 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let file = NSMenuItem()
         file.submenu = NSMenu(title: localized("File"))
         file.submenu?.addItem(withTitle: localized("Paste Link"), action: #selector(pasteLink), keyEquivalent: "v").target = self
-        if MusicPreview.script != nil {
-            file.submenu?.addItem(withTitle: "Download Music…", action: #selector(showMusicPreview),
-                                 keyEquivalent: "").target = self
-        }
         file.submenu?.addItem(.separator())
         file.submenu?.addItem(withTitle: localized("Copy"), action: #selector(copyFile(_:)), keyEquivalent: "").target = self
         file.submenu?.addItem(withTitle: localized("Copy Link"), action: #selector(copyRowLink(_:)), keyEquivalent: "").target = self
@@ -177,13 +181,6 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         bar.addItem(windows)
         NSApp.windowsMenu = windowMenu
         NSApp.mainMenu = bar
-    }
-
-    @objc private func showMusicPreview() {
-        let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
-        musicPreview.show(defaultFolder: folder, initialURL: clipboard) { [weak self] message in
-            self?.status.stringValue = message
-        }
     }
 
     private func button(_ label: String, _ selector: Selector) -> NSButton {
@@ -370,7 +367,12 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let qualityDivider = separator(vertical: true)
         qualityDivider.heightAnchor.constraint(equalToConstant: 22).isActive = true
         quality.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        let controls = NSStackView(views: [title, NSView(), mode, qualityDivider, quality])
+        musicSource.addItems(withTitles: [localized("Automatic"), "Amazon Music", "Tidal", "Qobuz", "Deezer"])
+        musicSource.toolTip = localized("Audio source")
+        musicSource.target = self
+        musicSource.action = #selector(changeMusicSource)
+        musicSource.isHidden = true
+        let controls = NSStackView(views: [title, NSView(), mode, qualityDivider, quality, musicSource])
         controls.alignment = .centerY
         controls.spacing = 10
 
@@ -1055,6 +1057,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         showCompleted = false
         switchPage()
         for link in links {
+            if MusicPreview.script != nil && MusicPreview.accepts(link) {
+                addMusic(link)
+                continue
+            }
+            showMusicControls(for: nil)
             status.stringValue = localized("Reading link…")
             _ = process(["inspect", link], event: { [weak self] message in
                 guard let self = self else { return }
@@ -1089,8 +1096,99 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
     }
 
+    private func addMusic(_ link: String) {
+        let item = Download(["url": link])
+        item.music = true
+        downloads.append(item)
+        refresh()
+        if let row = rows.firstIndex(where: { $0 === item }) {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            table.scrollRowToVisible(row)
+        }
+        showMusicControls(for: item)
+        item.process = musicPreview.run(link: link, folder: outputFolder(for: "audio_folder"),
+                                        source: nil, format: "FLAC", inspect: true, status: { _ in },
+                                        event: { [weak self, weak item] _, data in
+            guard let self = self, let item = item,
+                  let info = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] else { return }
+            item.title = info["title"] ?? item.url
+            self.refresh()
+            guard let raw = info["thumbnail"], let url = URL(string: raw), url.scheme == "https" else { return }
+            URLSession.shared.dataTask(with: url) { [weak self, weak item] data, _, _ in
+                guard let data = data else { return }
+                DispatchQueue.main.async {
+                    item?.image = NSImage(data: data)
+                    self?.refresh()
+                }
+            }.resume()
+        }, finish: { [weak self, weak item] code, message in
+            guard let self = self, let item = item else { return }
+            item.process = nil
+            if item.pendingRemoval {
+                self.delete(item, trashFile: false)
+            } else if item.status != "Paused" {
+                if code != 0 {
+                    item.lastError = message
+                    item.status = "Error"
+                    self.status.stringValue = message
+                } else if NativePreferences.read()["auto"] as? Bool == true {
+                    self.schedule(item)
+                }
+            }
+            self.dispatch()
+        })
+        if item.process == nil {
+            item.status = "Error"
+            status.stringValue = "Could not launch the music engine."
+        }
+        refresh()
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        let row = table.selectedRow
+        if rows.indices.contains(row) {
+            let item = rows[row]
+            showMusicControls(for: item.music && !item.done ? item : nil)
+        }
+    }
+
+    private func showMusicControls(for item: Download?) {
+        if musicSelection === item { return }
+        if musicSelection == nil {
+            previousMode = mode.selectedSegment
+            previousFormat = selectedFormat
+        }
+        musicSelection = item
+        musicSource.isHidden = item == nil
+        mode.isEnabled = item == nil
+        quality.isEnabled = item?.startedMode == nil
+        musicSource.isEnabled = item?.startedMode == nil
+        if let item = item {
+            mode.selectedSegment = 1
+            musicSource.selectItem(at: item.musicSource)
+        } else {
+            mode.selectedSegment = previousMode
+        }
+        changeMode()
+        if item == nil, let index = formatChoices.firstIndex(of: previousFormat) {
+            quality.selectItem(at: index)
+            refresh()
+        }
+    }
+
+    @objc private func changeMusicSource() {
+        if let item = musicSelection, item.startedMode == nil {
+            item.musicSource = musicSource.indexOfSelectedItem
+        }
+    }
+
     private var formatChoices: [String] {
-        mode.selectedSegment == 1 ? ["MP3", "M4A"] : ["best", "2160p", "1080p", "720p", "480p"]
+        if musicSelection != nil { return ["FLAC", "M4A", "MP3"] }
+        return mode.selectedSegment == 1 ? ["MP3", "M4A"] : ["best", "2160p", "1080p", "720p", "480p"]
+    }
+
+    private var regularFormat: String {
+        musicSelection == nil ? selectedFormat : previousFormat
     }
 
     private var selectedFormat: String {
@@ -1104,19 +1202,26 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         quality.addItems(withTitles: formatChoices.map {
             $0 == "best" ? localized("Best available") : $0
         })
-        quality.selectItem(at: 0)
+        quality.selectItem(at: formatChoices.firstIndex(of: musicSelection?.musicFormat ?? "") ?? 0)
         refresh()
     }
 
-    @objc private func changeQuality() { refresh() }
+    @objc private func changeQuality() {
+        if let item = musicSelection, item.startedMode == nil { item.musicFormat = selectedFormat }
+        refresh()
+    }
 
     private func schedule(_ item: Download) {
         item.retry?.cancel()
         item.retry = nil
         item.retryCount = 0
-        item.startedMode = item.startedMode ?? selectedFormat
+        item.startedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
         item.status = "Waiting"
         item.scheduled = true
+        if musicSelection === item {
+            quality.isEnabled = false
+            musicSource.isEnabled = false
+        }
     }
 
     @objc private func selectQueue() {
@@ -1126,6 +1231,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc private func selectCompleted() {
         showCompleted = true
+        showMusicControls(for: nil)
         switchPage()
     }
 
@@ -1139,7 +1245,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func startAll() {
-        for item in downloads where !item.done && !item.pendingRemoval && item.process == nil {
+        for item in downloads where !item.done && !item.pendingRemoval && (item.process == nil || item.music && item.startedMode == nil) {
             schedule(item)
         }
         dispatch()
@@ -1238,15 +1344,23 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let active = downloads.filter { $0.process != nil }.count
         let limit = NativePreferences.read()["parallel"] as? Int ?? 3
         let available = max(0, min(max(limit, 1), 10) - active)
-        for item in downloads.filter({ $0.scheduled && !$0.pendingRemoval && $0.process == nil }).prefix(available) {
+        var remaining = available
+        for item in downloads where item.scheduled && !item.pendingRemoval && item.process == nil {
+            guard remaining > 0 else { break }
+            if item.music && downloads.contains(where: { $0.music && $0.startedMode != nil && $0.process != nil }) { continue }
             begin(item)
+            remaining -= 1
         }
         refresh()
     }
 
     private func begin(_ item: Download) {
-        let selectedMode = item.startedMode ?? selectedFormat
+        let selectedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
         item.startedMode = selectedMode
+        if item.music {
+            beginMusic(item, format: selectedMode)
+            return
+        }
         let audio = ["MP3", "M4A"].contains(selectedMode) && !item.url.contains("instagram.com/")
         let destination = outputFolder(for: audio ? "audio_folder" : "video_folder")
         let engineMode = selectedMode == "best" && !engineUsesModeKeys ? "Лучшее видео" : selectedMode
@@ -1307,6 +1421,46 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if item.process == nil {
             item.status = "Error"
             notify("Download failed", body: item.title, setting: "notify_failed", enabledByDefault: true)
+        } else {
+            notify("Download started", body: item.title, setting: "notify_started")
+        }
+    }
+
+    private func beginMusic(_ item: Download, format: String) {
+        item.scheduled = false
+        item.status = "Connecting…"
+        item.lastError = ""
+        let source = musicSources[item.musicSource]
+        item.process = musicPreview.run(link: item.url, folder: outputFolder(for: "audio_folder"),
+                                        source: source.isEmpty ? nil : source, format: format,
+                                        status: { [weak self, weak item] message in
+            guard let self = self, let item = item, item.status != "Paused" else { return }
+            self.status.stringValue = message
+            item.status = "Downloading"
+            self.refresh()
+        }, event: { [weak item] kind, data in
+            if kind == "YTDL_FILE", let path = try? JSONDecoder().decode(String.self, from: data) {
+                item?.files = [URL(fileURLWithPath: path)]
+            }
+        }, finish: { [weak self, weak item] code, message in
+            guard let self = self, let item = item else { return }
+            item.process = nil
+            if item.pendingRemoval {
+                self.delete(item, trashFile: false)
+            } else if item.status != "Paused" || !item.files.isEmpty {
+                item.done = code == 0 && !item.files.isEmpty
+                item.status = item.done ? "Done" : "Error"
+                item.lastError = item.done ? "" : message
+                self.status.stringValue = item.lastError
+                self.notify(item.done ? "Download completed" : "Download failed", body: item.title,
+                            setting: item.done ? "notify_completed" : "notify_failed", enabledByDefault: true)
+            }
+            self.dispatch()
+            if item.done { self.finishQueueIfNeeded(last: item) }
+        })
+        if item.process == nil {
+            item.status = "Error"
+            status.stringValue = "Could not launch the music engine."
         } else {
             notify("Download started", body: item.title, setting: "notify_started")
         }
@@ -1452,8 +1606,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.retry?.cancel()
         item.retry = nil
         item.retryCount = 0
-        begin(item)
-        refresh()
+        if item.music {
+            schedule(item)
+            dispatch()
+        } else {
+            begin(item)
+            refresh()
+        }
     }
 
     @objc private func stopDownload(_ sender: NSMenuItem) {
@@ -1555,9 +1714,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             cell.alignment = .centerY
             return cell
         case "format":
-            let selectedMode = item.startedMode ?? selectedFormat
+            let selectedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
             let format = item.files.last?.pathExtension.uppercased() ??
-                (item.url.contains("instagram.com/") ? "Media" : (["MP3", "M4A"].contains(selectedMode) ? selectedMode : "MP4"))
+                (item.url.contains("instagram.com/") ? "Media" : (item.music || ["MP3", "M4A"].contains(selectedMode) ? selectedMode : "MP4"))
             let badge = NSTextField(labelWithString: localized(format))
             badge.font = .systemFont(ofSize: 11, weight: .medium)
             badge.alignment = .center
