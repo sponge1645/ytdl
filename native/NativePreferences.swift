@@ -285,6 +285,10 @@ final class NativePreferences: NSObject {
     }
 
     @objc private func requestSafariAccess() {
+        Self.showSafariAccessInstructions()
+    }
+
+    static func showSafariAccessInstructions() {
         let alert = NSAlert()
         alert.messageText = localized("Allow Safari cookie access")
         alert.informativeText = localized("If access is not already enabled, add YouTube Downloader to Full Disk Access, then quit and reopen the app.")

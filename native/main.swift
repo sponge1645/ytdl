@@ -1232,7 +1232,19 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         guard let host = URL(string: link)?.host?.lowercased(), hosts.contains(host) else { return false }
         let error = message.lowercased().replacingOccurrences(of: "’", with: "'")
         return error.contains("[youtube]") && error.contains("sign in to confirm you're not a bot")
-            || error.contains("cookies.binarycookies") && error.contains("operation not permitted")
+    }
+
+    private func showSafariAccessIfNeeded(_ message: String) -> Bool {
+        let error = message.lowercased()
+        guard NativePreferences.read()["youtube_cookie_browser"] as? String == "safari",
+              error.contains("cookies.binarycookies"),
+              error.contains("operation not permitted") || error.contains("permission denied") else { return false }
+        if !askingForYouTubeSession {
+            askingForYouTubeSession = true
+            defer { askingForYouTubeSession = false }
+            NativePreferences.showSafariAccessInstructions()
+        }
+        return true
     }
 
     private func requestYouTubeSession(for link: String) -> Bool {
@@ -1288,6 +1300,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             showMusicControls(for: nil)
             setFooterStatus(localized("Reading link…"))
             var needsYouTubeSession = false
+            var inspectError = ""
             _ = process(["inspect", link], event: { [weak self] message in
                 guard let self = self else { return }
                 if message["event"] as? String == "youtube_session_required" {
@@ -1310,11 +1323,14 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     self.refresh()
                 } else if let label = message["status"] as? String {
                     let isError = message["event"] as? String == "error"
+                    if isError { inspectError = label }
                     needsYouTubeSession = needsYouTubeSession || (isError && self.isYouTubeSessionError(label, for: link))
                     self.setFooterStatus(localized(label), error: isError)
                 }
             }, finish: { [weak self] code in
-                guard let self = self, code != 0, canAskForYouTubeSession, needsYouTubeSession,
+                guard let self = self, code != 0 else { return }
+                if self.showSafariAccessIfNeeded(inspectError) { return }
+                guard canAskForYouTubeSession, needsYouTubeSession,
                       self.requestYouTubeSession(for: link) else { return }
                 self.addLinks([link], canAskForYouTubeSession: false)
             })
@@ -1775,7 +1791,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 return
             }
             if item.status != "Paused" {
-                if code != 0, !item.didRetryYouTubeSession,
+                let safariAccessDenied = code != 0 && self.showSafariAccessIfNeeded(item.lastError)
+                if code != 0, !safariAccessDenied, !item.didRetryYouTubeSession,
                    needsYouTubeSession || self.isYouTubeSessionError(item.lastError, for: item.url),
                    self.requestYouTubeSession(for: item.url) {
                     self.schedule(item)
@@ -1783,7 +1800,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     self.dispatch()
                     return
                 }
-                if code != 0 && self.retryIfTransient(item) {
+                if code != 0 && !safariAccessDenied && self.retryIfTransient(item) {
                     self.dispatch()
                     return
                 }
