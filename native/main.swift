@@ -21,6 +21,7 @@ private final class Download {
     var thumbnailURL: URL?
     var retry: DispatchWorkItem?
     var retryCount = 0
+    var didRetryYouTubeSession = false
     var lastError = ""
     var files: [URL] = []
     var existingFiles: [URL] {
@@ -1226,6 +1227,14 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private var askingForYouTubeSession = false
 
+    private func isYouTubeSessionError(_ message: String, for link: String) -> Bool {
+        let hosts = ["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"]
+        guard let host = URL(string: link)?.host?.lowercased(), hosts.contains(host) else { return false }
+        let error = message.lowercased().replacingOccurrences(of: "’", with: "'")
+        return error.contains("[youtube]") && error.contains("sign in to confirm you're not a bot")
+            || error.contains("cookies.binarycookies") && error.contains("operation not permitted")
+    }
+
     private func requestYouTubeSession(for link: String) -> Bool {
         guard !askingForYouTubeSession, let url = URL(string: link) else { return false }
         askingForYouTubeSession = true
@@ -1264,7 +1273,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
     }
 
-    private func addLinks(_ links: [String]) {
+    private func addLinks(_ links: [String], canAskForYouTubeSession: Bool = true) {
         showCompleted = false
         switchPage()
         for link in links {
@@ -1278,14 +1287,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
             showMusicControls(for: nil)
             setFooterStatus(localized("Reading link…"))
-            var retryWithYouTubeSession = false
+            var needsYouTubeSession = false
             _ = process(["inspect", link], event: { [weak self] message in
                 guard let self = self else { return }
-                if message["event"] as? String == "youtube_session_required" {
-                    retryWithYouTubeSession = self.requestYouTubeSession(for: link)
-                    return
-                }
-                if retryWithYouTubeSession { return }
                 if let items = message["items"] as? [[String: Any]] {
                     let added = items.map { Download($0) }
                     for (info, item) in zip(items, added) {
@@ -1303,10 +1307,14 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     if self.status.stringValue == localized("Reading link…") { self.setFooterStatus("") }
                     self.refresh()
                 } else if let label = message["status"] as? String {
-                    self.setFooterStatus(localized(label), error: message["event"] as? String == "error")
+                    let isError = message["event"] as? String == "error"
+                    needsYouTubeSession = isError && self.isYouTubeSessionError(label, for: link)
+                    self.setFooterStatus(localized(label), error: isError)
                 }
-            }, finish: { [weak self] _ in
-                if retryWithYouTubeSession { self?.addLinks([link]) }
+            }, finish: { [weak self] code in
+                guard let self = self, code != 0, canAskForYouTubeSession, needsYouTubeSession,
+                      self.requestYouTubeSession(for: link) else { return }
+                self.addLinks([link], canAskForYouTubeSession: false)
             })
         }
     }
@@ -1548,6 +1556,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.retry?.cancel()
         item.retry = nil
         item.retryCount = 0
+        item.didRetryYouTubeSession = false
         item.startedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
         item.status = "Waiting"
         item.scheduled = true
@@ -1723,7 +1732,6 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.scheduled = false
         item.status = "Connecting…"
         item.lastError = ""
-        var retryWithYouTubeSession = false
         item.process = process(["download", String(decoding: data, as: UTF8.self)], event: { [weak self, weak item] message in
             guard let self = self, let item = item else { return }
             switch message["event"] as? String {
@@ -1731,10 +1739,6 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 if let path = message["path"] as? String {
                     let file = URL(fileURLWithPath: path)
                     if !item.files.contains(file) { item.files.append(file) }
-                }
-            case "youtube_session_required":
-                if !item.pendingRemoval && item.status != "Paused" {
-                    retryWithYouTubeSession = self.requestYouTubeSession(for: item.url)
                 }
             case "youtube_session":
                 if item.status != "Paused", let label = message["status"] as? String {
@@ -1749,7 +1753,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     } else { item.progress = nil }
                 }
             case "error":
-                if !retryWithYouTubeSession, let label = message["status"] as? String {
+                if let label = message["status"] as? String {
                     item.lastError = label
                     self.setFooterStatus(localized(label), error: true)
                 }
@@ -1766,8 +1770,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 return
             }
             if item.status != "Paused" {
-                if retryWithYouTubeSession {
+                if code != 0, !item.didRetryYouTubeSession,
+                   self.isYouTubeSessionError(item.lastError, for: item.url),
+                   self.requestYouTubeSession(for: item.url) {
                     self.schedule(item)
+                    item.didRetryYouTubeSession = true
                     self.dispatch()
                     return
                 }
