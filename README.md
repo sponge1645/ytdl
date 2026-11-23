@@ -27,7 +27,7 @@ YTDL_BUILD_SAFARI=1 YTDL_TOOLS_PUBLIC_KEY="$(cat "$HOME/ytdl-signing/public.pem"
 open "dist/universal/Media Downloader.app"
 ```
 
-The full build requires macOS 11 or newer and uses Python 3 for music downloads. The macOS build workflow starts on manual dispatch. You can download the `YTDL-Universal` artifact from a successful [macOS workflow run](https://github.com/sponge1645/ytdl/actions/workflows/macos.yml). Building an engine kit locally with `bash build-macos.sh --engine-kit` also requires Python 3.11 or newer and internet access.
+The full build requires macOS 11 or newer and uses Python 3 for music downloads. The macOS build workflow starts on manual dispatch. You can download the `Media-Downloader-<version>` artifact from a successful [macOS workflow run](https://github.com/sponge1645/ytdl/actions/workflows/macos.yml). Building an engine kit locally with `bash build-macos.sh --engine-kit` also requires Python 3.11 or newer and internet access.
 
 ## Engine update channel
 

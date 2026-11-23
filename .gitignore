@@ -18,5 +18,5 @@ __pycache__/
 *.pfx
 
 # Release artifacts
-/YouTube-Downloader-*.zip
-/YouTube-Downloader-*.zip.sha256
+/Media-Downloader-*.zip
+/Media-Downloader-*.zip.sha256
