@@ -374,6 +374,27 @@ def finalize_flac(path, descriptor):
     return destination
 
 
+def audio_codec(path):
+    probe = subprocess.run([media_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
+                            "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", str(path)],
+                           capture_output=True, text=True, check=True, timeout=30)
+    return probe.stdout.strip()
+
+
+def unwrap_flac(path, label):
+    try:
+        codec = audio_codec(path)
+    except subprocess.CalledProcessError:
+        codec = ""
+    if codec != "flac":
+        raise AudioUnavailable(f"{label} did not provide FLAC (audio codec: {codec or 'unknown'}).")
+    destination = path.parent / "lossless.flac"
+    subprocess.run([media_tool("ffmpeg"), "-nostdin", "-v", "error", "-xerror", "-i", str(path),
+                    "-map", "0:a:0", "-c:a", "copy", "-f", "flac", str(destination)],
+                   capture_output=True, check=True, timeout=120)
+    return destination
+
+
 def write_metadata(source, destination, track, codec):
     command = [media_tool("ffmpeg"), "-nostdin", "-v", "error", "-xerror", "-y", "-i", str(source)]
     cover = destination.parent / "streaming-cover"
@@ -543,10 +564,7 @@ def download_track(engine, track, provider, service, audio_format, output, desti
     if dolby:
         path = finalize_dolby(path, descriptor, extension, expected_codec)
     elif compressed:
-        probe = subprocess.run([media_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
-                                "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", str(path)],
-                               capture_output=True, text=True, check=True, timeout=30)
-        input_codec = probe.stdout.strip()
+        input_codec = audio_codec(path)
         if not input_codec:
             raise RuntimeError("The source did not return a readable audio stream.")
     else:
@@ -561,7 +579,7 @@ def download_track(engine, track, provider, service, audio_format, output, desti
                 audio.seek(10 + size + (10 if header[3] == 4 and header[5] & 16 else 0))
                 header = audio.read(4)
         if not header.startswith(b"fLaC"):
-            raise AudioUnavailable(f"{label} returned a file without a FLAC header (format: {actual}): {path}")
+            path = unwrap_flac(path, label)
     if gui:
         codec = ["-c:a", "copy"]
         if audio_format == "MP3":
