@@ -139,7 +139,7 @@ def verify(engine, service, gui):
             "Complete verification in the browser, then paste the final mornye:// return URL here: "
         ).strip()
     if not callback:
-        raise RuntimeError("Music verification cancelled.")
+        raise RuntimeError("Music verification expired or was cancelled. Retry to request a new link.")
     parsed = urlsplit(callback)
     values = parse_qs(parsed.query)
     if ((parsed.scheme, parsed.netloc) != ("mornye", "session-grant")
@@ -150,10 +150,10 @@ def verify(engine, service, gui):
     engine.call("processPendingExtensionCallbacks", {})
 
 
-def install_package(engine, home, name):
+def install_package(engine, home, name, *, reinstall=False):
     package = home / f"{name}.sflx"
     extension_id = "amazon" if name == "amzn" else name
-    if ((home / "extensions" / extension_id).is_dir() and package.is_file()
+    if (not reinstall and (home / "extensions" / extension_id).is_dir() and package.is_file()
             and hashlib.sha256(package.read_bytes()).hexdigest() == PACKAGES[name]):
         return
     base = "https://raw.githubusercontent.com/mornyeapp/Mornye-Extension"
@@ -162,10 +162,13 @@ def install_package(engine, home, name):
         data = response.read(4 * 1024 * 1024 + 1)
     if hashlib.sha256(data).hexdigest() != PACKAGES[name]:
         raise RuntimeError(f"The {name} extension failed checksum verification.")
-    package.write_bytes(data)
-    result = engine.call("loadExtensionFromPath", {"file_path": str(package)})
-    if isinstance(result, dict) and result.get("success") is False:
-        raise RuntimeError(f"The engine could not load {name}.")
+    with tempfile.TemporaryDirectory(prefix=".extension-", dir=home) as directory:
+        staged = Path(directory) / package.name
+        staged.write_bytes(data)
+        result = engine.call("loadExtensionFromPath", {"file_path": str(staged)})
+        if result is False or (isinstance(result, dict) and result.get("success") is False):
+            raise RuntimeError(f"The engine could not load {name}.")
+        staged.replace(package)
 
 
 def metadata_provider(url):
@@ -518,6 +521,27 @@ def run(args, home):
         print(f"Saved FLAC: {path}")
 
 
+def maintain_metadata_extensions(args, home):
+    extensions = (("spotify-web", "Spotify"), ("apple-music", "Apple Music"))
+    if args.maintenance == "reinstall":
+        library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
+        with tempfile.TemporaryDirectory(prefix=".maintenance-", dir=home) as directory:
+            with open_music_engine(library, home, Path(directory)) as engine:
+                for name, _ in extensions:
+                    install_package(engine, home, name, reinstall=True)
+    states = []
+    for name, label in extensions:
+        package = home / f"{name}.sflx"
+        if not package.is_file() or not (home / "extensions" / name).is_dir():
+            state = "not installed"
+        elif hashlib.sha256(package.read_bytes()).hexdigest() == PACKAGES[name]:
+            state = "verified"
+        else:
+            state = "reinstall needed"
+        states.append(f"{label}: {state}")
+    print(" · ".join(states), flush=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path)
@@ -528,6 +552,7 @@ if __name__ == "__main__":
     parser.add_argument("--inspect", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--format", choices=("FLAC", "FLAC-CD", "M4A", "MP3", *DOLBY_FORMATS), default="FLAC")
     parser.add_argument("--track-json", help=argparse.SUPPRESS)
+    parser.add_argument("--maintenance", choices=("check", "reinstall"), help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.output.exists() and not args.gui:
         parser.error("Choose a new output directory so the test cannot match an old file.")
@@ -535,7 +560,9 @@ if __name__ == "__main__":
         os.umask(0o077)
         home = Path.home() / "Library/Application Support/YTDL/Music Preview"
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if args.gui:
+        if args.maintenance:
+            maintain_metadata_extensions(args, home)
+        elif args.gui:
             folder = home if args.inspect else args.output.resolve()
             folder.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix=".ytdl-music-", dir=folder) as staging:

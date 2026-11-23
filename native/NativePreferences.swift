@@ -154,7 +154,15 @@ final class NativePreferences: NSObject {
         engineStatus.maximumNumberOfLines = 3
         engineStatus.preferredMaxLayoutWidth = 470
         engineVersions.stringValue = localized("Loading tool versions…")
-        addTab("Engine", to: tabs, with: [engineVersions, NSStackView(views: engineButtons), engineStatus])
+        let toolActions = NSStackView(views: engineButtons)
+        var engineViews: [NSView] = [engineVersions, toolActions]
+        if MusicPreview.script != nil {
+            let checkMusic = NSButton(title: localized("Check Spotify and Apple Music"), target: self, action: #selector(checkMusicExtensions))
+            let reinstallMusic = NSButton(title: localized("Reinstall Music Extensions"), target: self, action: #selector(reinstallMusicExtensions))
+            engineButtons += [checkMusic, reinstallMusic]
+            engineViews.append(NSStackView(views: [checkMusic, reinstallMusic]))
+        }
+        addTab("Engine", to: tabs, with: engineViews + [engineStatus])
         engineAction("tool-versions") { [weak self] in self?.engineVersions.stringValue = $0 }
 
         let cancel = NSButton(title: localized("Cancel"), target: self, action: #selector(close))
@@ -214,6 +222,9 @@ final class NativePreferences: NSObject {
         item.view = page
         tabs.addTabViewItem(item)
     }
+
+    @objc private func checkMusicExtensions() { performEngineAction("check-music", status: "Checking music extensions…") }
+    @objc private func reinstallMusicExtensions() { performEngineAction("reinstall-music", status: "Reinstalling music extensions…") }
 
     @objc private func checkTools() { performEngineAction("update-tools", status: "Checking for tool updates…") }
     @objc private func cleanTools() { performEngineAction("clean-tools", status: "Cleaning old tool kits…") }

@@ -30,7 +30,7 @@ final class MusicPreview {
                 .contains { host == "music.amazon." + $0 }
     }
 
-    func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false, trackJSON: String? = nil,
+    func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false, trackJSON: String? = nil, maintenance: String? = nil,
              status: @escaping (String) -> Void,
              log: @escaping (String) -> Void = { _ in },
              event: @escaping (String, Data) -> Void,
@@ -43,6 +43,7 @@ final class MusicPreview {
         var arguments = ["-u", script.path, Bundle.main.bundlePath, link, folder.path, "--gui", "--format", format]
         if let source = source { arguments += ["--source", source] }
         if inspect { arguments.append("--inspect") }
+        if let maintenance = maintenance { arguments += ["--maintenance", maintenance] }
         if let trackJSON = trackJSON { arguments += ["--track-json", trackJSON] }
         worker.arguments = arguments
         worker.standardOutput = pipe
@@ -103,11 +104,10 @@ final class MusicPreview {
             return
         }
         pendingInputs[state] = input
-        status("Complete music verification in your browser…")
-        if !NSWorkspace.shared.open(url) {
-            closeVerification(input)
-            return
-        }
+        let opened = NSWorkspace.shared.open(url)
+        status(opened ? "Complete verification in your browser. Paste the return link here with ⌘V if needed."
+                      : "Could not open verification. Retry the track to request a new link.")
+        if !opened { closeVerification(input); return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self] in
             self?.closeVerification(input)
         }
@@ -118,7 +118,8 @@ final class MusicPreview {
         pendingInputs.removeValue(forKey: state)?.closeFile()
     }
 
-    func acceptVerification(_ url: URL) {
+    @discardableResult
+    func acceptVerification(_ url: URL) -> Bool {
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               parts.scheme == "mornye", parts.host == "session-grant",
               parts.path.isEmpty, parts.user == nil, parts.password == nil,
@@ -128,10 +129,16 @@ final class MusicPreview {
               let state = items.first(where: { $0.name == "state" })?.value,
               let input = pendingInputs[state],
               items.filter({ $0.name == "grant" }).count == 1,
-              let grant = items.first(where: { $0.name == "grant" })?.value, !grant.isEmpty else { return }
-        try? input.write(contentsOf: Data((url.absoluteString + "\n").utf8))
+              let grant = items.first(where: { $0.name == "grant" })?.value, !grant.isEmpty else { return false }
+        do {
+            try input.write(contentsOf: Data((url.absoluteString + "\n").utf8))
+        } catch {
+            closeVerification(input)
+            return false
+        }
         closeVerification(input)
         NSApp.activate(ignoringOtherApps: true)
+        return true
     }
 
 }

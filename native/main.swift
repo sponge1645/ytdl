@@ -1101,6 +1101,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func pasteLink() {
+        if let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let url = URL(string: text), url.scheme?.lowercased() == "mornye" {
+            if !musicPreview.acceptVerification(url) {
+                status.stringValue = localized("This return link does not match an active verification. Retry the track for a new link.")
+            }
+            return
+        }
         guard toolsReady else { NSSound.beep(); return }
         let pasted = links(from: NSPasteboard.general)
         guard !pasted.isEmpty else { status.stringValue = localized("Copy an HTTP or HTTPS link first."); return }
@@ -1439,6 +1446,15 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     private func runEngineAction(_ action: String, reply: @escaping (String) -> Void) {
+        if action == "check-music" || action == "reinstall-music" {
+            let task = musicPreview.run(link: "", folder: folder, source: nil, format: "FLAC",
+                                        maintenance: action == "check-music" ? "check" : "reinstall",
+                                        status: { _ in }, event: { _, _ in }, finish: { _, message in
+                reply(message.isEmpty ? localized("Tool operation failed.") : message)
+            })
+            if task == nil { reply(localized("Tool operation failed.")) }
+            return
+        }
         if isUniversalDownload && action == "update-tools" {
             runBootstrap(mode: toolsReady ? "manual" : "install", reply: reply)
             return
