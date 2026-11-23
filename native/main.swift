@@ -152,6 +152,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     let quality = NSPopUpButton()
     private var qualityWidth: NSLayoutConstraint?
     private var sharedAudioFormat: String?
+    private var queuedMusicFormat: String?
     let musicSource = NSPopUpButton()
     private weak var musicSelection: Download?
     private var previousMode = 0
@@ -1144,7 +1145,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private func addMusic(_ link: String) {
         let item = Download(["url": link])
         item.music = true
-        item.musicFormat = defaultMusicFormat(for: item)
+        let preferred = queuedMusicFormat ?? defaultMusicFormat(for: item)
+        item.musicFormat = musicFormatChoices(for: item).contains(preferred) ? preferred : defaultMusicFormat(for: item)
         downloads.append(item)
         refresh()
         if table.selectedRowIndexes.isEmpty, let row = rows.firstIndex(where: { $0 === item }) {
@@ -1286,17 +1288,19 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         ["ytmusic-spotiflac", "jiosaavn"].contains(effectiveSource(for: item)) ? "M4A" : "FLAC"
     }
 
+    private func musicFormatChoices(for item: Download) -> [String] {
+        var choices = defaultMusicFormat(for: item) == "FLAC" ? ["FLAC"] : []
+        let source = effectiveSource(for: item)
+        if source == "tidal-web" || source == "qobuz-web" { choices.append("FLAC-CD") }
+        choices.append("M4A")
+        if source == "tidal-web" { choices.append("M4A-ATMOS") }
+        if source == "amazon" { choices += ["M4A-DDP", "MP4-ATMOS"] }
+        choices.append("MP3")
+        return choices
+    }
+
     private var formatChoices: [String] {
-        if let item = musicSelection {
-            var choices = defaultMusicFormat(for: item) == "FLAC" ? ["FLAC"] : []
-            let source = effectiveSource(for: item)
-            if source == "tidal-web" || source == "qobuz-web" { choices.append("FLAC-CD") }
-            choices.append("M4A")
-            if source == "tidal-web" { choices.append("M4A-ATMOS") }
-            if source == "amazon" { choices += ["M4A-DDP", "MP4-ATMOS"] }
-            choices.append("MP3")
-            return choices
-        }
+        if let item = musicSelection { return musicFormatChoices(for: item) }
         return mode.selectedSegment == 1 ? ["MP3", "M4A"] : ["best", "2160p", "1080p", "720p", "480p"]
     }
 
@@ -1337,6 +1341,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc private func changeQuality() {
         if let item = musicSelection, item.startedMode == nil {
+            queuedMusicFormat = selectedFormat
             for row in pendingMusicGroup(for: item) { row.musicFormat = selectedFormat }
             if selectedFormat == "MP3" || selectedFormat.hasPrefix("M4A") {
                 let shared = selectedFormat == "MP3" ? "MP3" : "M4A"
