@@ -67,6 +67,16 @@ private final class DropZoneIcon: NSView {
 private final class DownloadTable: NSTableView, NSMenuItemValidation {
     var rowMenu: ((Int) -> NSMenu?)?
     var selectedFiles: (() -> [URL])?
+    var removeSelection: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if (event.keyCode == 51 || event.keyCode == 117), !selectedRowIndexes.isEmpty,
+           event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
+            removeSelection?()
+            return
+        }
+        super.keyDown(with: event)
+    }
 
     @objc(copy:) func copySelectedFiles(_ sender: Any?) {
         writeFilesToPasteboard(selectedFiles?() ?? [])
@@ -94,6 +104,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
     let table = DownloadTable()
+    private var displayedRowIDs: [UUID] = []
+    private var refreshingRows = false
     private var logWindow: NSWindow?
     private var logTextView: NSTextView?
     private var logLines: [String] = []
@@ -125,7 +137,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
 
     var rows: [Download] {
-        downloads.filter { $0.done == showCompleted }
+        downloads.filter { $0.done == showCompleted && !$0.pendingRemoval }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -384,6 +396,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         controls.spacing = 10
 
         table.dataSource = self
+        table.allowsMultipleSelection = true
+        table.removeSelection = { [weak self] in self?.removeSelectedRows() }
         table.delegate = self
         table.registerForDraggedTypes([.URL, .string])
         table.setDraggingSourceOperationMask(.copy, forLocal: false)
@@ -417,11 +431,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let heading = NSAttributedString(string: localized("No downloads yet"), attributes: [
             .font: NSFont.systemFont(ofSize: 22, weight: .semibold), .foregroundColor: NSColor.labelColor
         ])
-        let hint = [
-            localized("Public links from YouTube, Vimeo, TikTok, SoundCloud, Instagram and more"),
-            MusicPreview.script == nil ? nil : localized("Music links from Spotify, Apple Music, YouTube Music, Beatport, JioSaavn, Amazon Music, Tidal, Qobuz and Deezer"),
-            localized("Drop a link here or press ⌘V")
-        ].compactMap { $0 }.joined(separator: "\n")
+        let hint = MusicPreview.script == nil
+            ? localized("Paste or drop a link from YouTube, Vimeo, TikTok, SoundCloud, Instagram and more (⌘V).")
+            : localized("Paste or drop a link from YouTube, Vimeo, Spotify, Apple Music, YouTube Music, SoundCloud, TikTok, Instagram, Amazon Music, Tidal, Qobuz, Deezer, Beatport or JioSaavn (⌘V).")
         let emptyContent = NSMutableAttributedString(attributedString: heading)
         emptyContent.append(NSAttributedString(string: "\n\n" + hint, attributes: [
             .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor
@@ -1110,11 +1122,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.musicFormat = defaultMusicFormat(for: item)
         downloads.append(item)
         refresh()
-        if let row = rows.firstIndex(where: { $0 === item }) {
+        if table.selectedRowIndexes.isEmpty, let row = rows.firstIndex(where: { $0 === item }) {
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             table.scrollRowToVisible(row)
         }
-        showMusicControls(for: item)
         var metadata: [String: Any]?
         item.inspectingMusic = true
         item.process = musicPreview.run(link: link, folder: outputFolder(for: "audio_folder"),
@@ -1150,7 +1161,6 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func expandMusic(_ item: Download, tracks: [[String: Any]], collection: Bool, skipped: Int) {
         guard let index = downloads.firstIndex(where: { $0 === item }) else { return }
-        let selectFirst = musicSelection === item
         let added = tracks.enumerated().compactMap { offset, track -> Download? in
             guard let name = track["name"] as? String, let artist = track["artists"] as? String,
                   let encoded = try? JSONSerialization.data(withJSONObject: track) else { return nil }
@@ -1180,11 +1190,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if skipped > 0 {
             status.stringValue = String(format: localized("%d unavailable tracks skipped."), skipped)
         }
-        refresh()
-        if selectFirst, !showCompleted, let first = added.first, let row = rows.firstIndex(where: { $0 === first }) {
-            showMusicControls(for: first)
-            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        }
+        refresh(replacing: item.id, with: added.first?.id)
     }
 
     private func pendingMusicGroup(for item: Download) -> [Download] {
@@ -1193,10 +1199,17 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !refreshingRows else { return }
+        updateMusicControlsForSelection()
+    }
+
+    private func updateMusicControlsForSelection() {
         let row = table.selectedRow
         if rows.indices.contains(row) {
             let item = rows[row]
             showMusicControls(for: item.music && !item.done ? item : nil)
+        } else {
+            showMusicControls(for: nil)
         }
     }
 
@@ -1428,6 +1441,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if task == nil { reply(localized("Tool operation failed.")) }
     }
 
+    private func removeSelectedRows() {
+        let visible = rows
+        let selected = table.selectedRowIndexes.compactMap { visible.indices.contains($0) ? visible[$0] : nil }
+        for item in selected where !item.pendingRemoval { clear(item) }
+        refresh()
+    }
+
     @objc private func clearList() {
         for item in rows where !item.pendingRemoval { clear(item) }
         refresh()
@@ -1656,14 +1676,33 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         refresh()
     }
 
-    private func refresh() {
+    private func refresh(replacing previousID: UUID? = nil, with replacementID: UUID? = nil) {
         let completed = downloads.filter { $0.done }.count
-        queueCount.stringValue = String(downloads.count - completed)
+        queueCount.stringValue = String(downloads.filter { !$0.done && !$0.pendingRemoval }.count)
         completedCount.stringValue = String(completed)
         let count = rows.count
         visibleCount.stringValue = itemCount(count)
         empty.isHidden = showCompleted || count > 0
-        table.reloadData()
+        let ids = rows.map(\.id)
+        let selectedIDs = Set(table.selectedRowIndexes.compactMap { index -> UUID? in
+            guard displayedRowIDs.indices.contains(index) else { return nil }
+            let id = displayedRowIDs[index]
+            return id == previousID ? replacementID : id
+        })
+        let selection = IndexSet(ids.indices.filter { selectedIDs.contains(ids[$0]) })
+        refreshingRows = true
+        if ids == displayedRowIDs {
+            table.reloadData(forRowIndexes: IndexSet(integersIn: ids.indices),
+                             columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
+        } else {
+            displayedRowIDs = ids
+            table.reloadData()
+        }
+        if table.selectedRowIndexes != selection {
+            table.selectRowIndexes(selection, byExtendingSelection: false)
+        }
+        refreshingRows = false
+        updateMusicControlsForSelection()
     }
 
     private func centeredCell(_ content: NSView) -> NSView {
