@@ -60,14 +60,18 @@ def proxy_config(command, proxy):
 YOUTUBE_SESSION_ACCEPTED = "YouTube accepted the browser session."
 
 
+def youtube_requires_session(url, error):
+    hosts = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+    message = error.casefold().replace("'", "’")
+    return (urlsplit(url).hostname in hosts and "[youtube]" in message
+            and "confirm you’re not a bot" in message)
+
+
 def youtube_cookie_retry(url, preferences, error):
     browser = preferences.get("youtube_cookie_browser")
-    hosts = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
-    if (browser in ("safari", "chrome", "firefox") and urlsplit(url).hostname in hosts
-            and "[youtube]" in error.lower() and "confirm you’re not a bot" in error.lower().replace("'", "’")):
+    if browser in ("safari", "chrome", "firefox") and youtube_requires_session(url, error):
         return ["--cookies-from-browser", browser]
     return []
-
 
 def inspect(url):
     if is_artlist(url):
@@ -94,6 +98,8 @@ def inspect(url):
             result = subprocess.run([*command, *cookies, "--", url], input=config,
                                     capture_output=True, text=True, timeout=90)
     if result.returncode:
+        if not cookies and youtube_requires_session(url, result.stderr):
+            emit("youtube_session_required")
         raise RuntimeError(result.stderr.strip() or "Unable to read this link.")
     data = json.loads(result.stdout)
     if "entries" not in data:
@@ -252,6 +258,8 @@ def download(request):
                 emit("log", status="YouTube requested sign-in; retrying with the selected browser session.")
                 commands.insert(attempt + 1, base_command)
                 continue
+            if youtube_requires_session(url, "\n".join(errors)):
+                emit("youtube_session_required")
         if attempt + 1 < len(commands) and any("Requested format is not available" in line for line in errors):
             emit("progress", status="Preparing MP4 conversion…")
             continue

@@ -540,8 +540,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             .font: NSFont.systemFont(ofSize: 22, weight: .semibold), .foregroundColor: NSColor.labelColor
         ])
         let hint = MusicPreview.script == nil
-            ? localized("Paste (⌘V) or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, TikTok, SoundCloud, Instagram and more.")
-            : localized("Paste (⌘V) or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, Spotify, Apple Music, YouTube Music, SoundCloud, TikTok, Instagram, Amazon Music, Tidal, Qobuz, Deezer, Beatport, JioSaavn and more.")
+            ? localized("Paste (⌘V) or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, TikTok, SoundCloud, Instagram, Artlist and more.")
+            : localized("Paste (⌘V) or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, Spotify, Apple Music, YouTube Music, SoundCloud, TikTok, Instagram, Amazon Music, Tidal, Qobuz, Deezer, Beatport, JioSaavn, Artlist and more.")
         let emptyContent = NSMutableAttributedString(attributedString: heading)
         emptyContent.append(NSAttributedString(string: "\n\n" + hint, attributes: [
             .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor
@@ -1224,6 +1224,46 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         return host == "artlist.io" || host.hasSuffix(".artlist.io")
     }
 
+    private var askingForYouTubeSession = false
+
+    private func requestYouTubeSession(for link: String) -> Bool {
+        guard !askingForYouTubeSession, let url = URL(string: link) else { return false }
+        askingForYouTubeSession = true
+        defer { askingForYouTubeSession = false }
+
+        let browsers = ["safari", "chrome", "firefox"]
+        let bundleIDs = ["com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox"]
+        let picker = NSPopUpButton()
+        picker.addItems(withTitles: ["Safari", "Chrome", "Firefox"])
+        picker.sizeToFit()
+        if let app = NSWorkspace.shared.urlForApplication(toOpen: url),
+           let id = Bundle(url: app)?.bundleIdentifier,
+           let index = bundleIDs.firstIndex(of: id) {
+            picker.selectItem(at: index)
+        } else {
+            picker.selectItem(at: -1)
+        }
+        let alert = NSAlert()
+        alert.messageText = localized("Allow YouTube browser cookies?")
+        alert.informativeText = localized("Choose a browser where you are signed in to YouTube. YTDL will remember your choice and use its cookies when YouTube requires sign-in. Safari may require Full Disk Access.")
+        alert.accessoryView = picker
+        alert.addButton(withTitle: localized("Allow"))
+        alert.addButton(withTitle: localized("Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn,
+              browsers.indices.contains(picker.indexOfSelectedItem) else { return false }
+        var prefs = NativePreferences.read()
+        prefs["youtube_cookie_browser"] = browsers[picker.indexOfSelectedItem]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: prefs, options: .prettyPrinted)
+            try data.write(to: NativePreferences.config, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: NativePreferences.config.path)
+            return true
+        } catch {
+            setFooterStatus(error.localizedDescription, error: true)
+            return false
+        }
+    }
+
     private func addLinks(_ links: [String]) {
         showCompleted = false
         switchPage()
@@ -1238,8 +1278,14 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
             showMusicControls(for: nil)
             setFooterStatus(localized("Reading link…"))
+            var retryWithYouTubeSession = false
             _ = process(["inspect", link], event: { [weak self] message in
                 guard let self = self else { return }
+                if message["event"] as? String == "youtube_session_required" {
+                    retryWithYouTubeSession = self.requestYouTubeSession(for: link)
+                    return
+                }
+                if retryWithYouTubeSession { return }
                 if let items = message["items"] as? [[String: Any]] {
                     let added = items.map { Download($0) }
                     for (info, item) in zip(items, added) {
@@ -1259,7 +1305,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 } else if let label = message["status"] as? String {
                     self.setFooterStatus(localized(label), error: message["event"] as? String == "error")
                 }
-            }, finish: { _ in })
+            }, finish: { [weak self] _ in
+                if retryWithYouTubeSession { self?.addLinks([link]) }
+            })
         }
     }
 
@@ -1675,6 +1723,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.scheduled = false
         item.status = "Connecting…"
         item.lastError = ""
+        var retryWithYouTubeSession = false
         item.process = process(["download", String(decoding: data, as: UTF8.self)], event: { [weak self, weak item] message in
             guard let self = self, let item = item else { return }
             switch message["event"] as? String {
@@ -1682,6 +1731,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 if let path = message["path"] as? String {
                     let file = URL(fileURLWithPath: path)
                     if !item.files.contains(file) { item.files.append(file) }
+                }
+            case "youtube_session_required":
+                if !item.pendingRemoval && item.status != "Paused" {
+                    retryWithYouTubeSession = self.requestYouTubeSession(for: item.url)
                 }
             case "youtube_session":
                 if item.status != "Paused", let label = message["status"] as? String {
@@ -1696,7 +1749,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     } else { item.progress = nil }
                 }
             case "error":
-                if let label = message["status"] as? String {
+                if !retryWithYouTubeSession, let label = message["status"] as? String {
                     item.lastError = label
                     self.setFooterStatus(localized(label), error: true)
                 }
@@ -1713,6 +1766,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 return
             }
             if item.status != "Paused" {
+                if retryWithYouTubeSession {
+                    self.schedule(item)
+                    self.dispatch()
+                    return
+                }
                 if code != 0 && self.retryIfTransient(item) {
                     self.dispatch()
                     return
