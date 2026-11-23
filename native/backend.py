@@ -10,7 +10,7 @@ import sys
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from artlist_preview import ARTLIST_ROOT, artlist_asset, resolve_artlist
+from artlist_preview import ARTLIST_ROOT, artlist_asset, is_artlist, resolve_artlist
 from dependencies import BIN_DIR, install_missing, tool_path
 from download_core import AUDIO, download_command, is_instagram, read_preferences as read_file_preferences, redact_credentials
 
@@ -58,7 +58,7 @@ def proxy_config(command, proxy):
 
 
 def inspect(url):
-    if artlist_asset(url):
+    if is_artlist(url):
         _, title = resolve_artlist(url, read_preferences()["proxy"])
         emit("items", items=[{"url": url, "title": title}])
         return
@@ -147,12 +147,13 @@ def download(request):
     executable = tool_path("yt-dlp")
     if not executable:
         raise RuntimeError("Download tools are still being installed.")
-    artlist = artlist_asset(url)
+    artlist = is_artlist(url)
     if artlist:
         media_url, title = resolve_artlist(url, prefs["proxy"])
-        mode = mode if artlist[0] != "clip" and mode in AUDIO else "best"
+        kind, _ = artlist_asset(url)
+        mode = mode if kind != "clip" and mode in AUDIO else "best"
         commands = [download_command(executable, folder, mode, media_url, prefs, temporary=temp,
-                                     preview=(title, ARTLIST_ROOT, artlist[0] == "clip"))]
+                                     preview=(title, ARTLIST_ROOT, kind == "clip"))]
     else:
         if instagram_video and mode in AUDIO:
             mode = "best"
@@ -264,7 +265,7 @@ def main():
             emit("versions", versions=versions)
         elif action == "setup":
             install_missing(lambda tool, index, total: emit("progress", status=f"Installing {tool} ({index}/{total})…"))
-            emit("capabilities", mode_keys=True, proxy_environment=True)
+            emit("capabilities", mode_keys=True, proxy_environment=True, artlist_preview=True)
         elif action == "inspect":
             inspect(sys.argv[2])
         elif action == "download":

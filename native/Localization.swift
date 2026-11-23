@@ -31,6 +31,7 @@ private enum InterfaceLanguage {
         "Clear Completed": "Очистить завершённые",
         "Ready · Paste (⌘V)": "Готово · Вставь (⌘V)",
         "Copy an HTTP or HTTPS link first.": "Сначала скопируй ссылку HTTP или HTTPS.",
+        "Update the download tools to use Artlist.": "Обнови инструменты загрузки для поддержки Artlist.",
         "Reading link…": "Читаем ссылку…",
         "Best available": "Лучшее доступное",
         "Queued": "В очереди",

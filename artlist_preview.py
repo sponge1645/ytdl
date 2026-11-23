@@ -9,6 +9,11 @@ ROUTES = {"/royalty-free-music/song/": "songs", "/sfx/track/": "sfxs",
           "/stock-footage/clip/": "clip"}
 
 
+def is_artlist(url):
+    host = urlsplit(url).hostname or ""
+    return host == "artlist.io" or host.endswith(".artlist.io")
+
+
 def artlist_asset(url):
     parts = urlsplit(url)
     if parts.scheme != "https" or parts.hostname not in {"artlist.io", "www.artlist.io"}:
@@ -52,11 +57,15 @@ def clip_objects(page):
 
 
 def resolve_artlist(url, proxy=""):
+    asset = artlist_asset(url)
+    if not asset:
+        raise ValueError("Use a direct HTTPS link to an Artlist song, sound effect, or footage clip.")
+    kind, asset_id = asset
+
     from yt_dlp import YoutubeDL
     from yt_dlp.networking import Request
     from yt_dlp.networking.exceptions import RequestError
 
-    kind, asset_id = artlist_asset(url)
     headers = {"Referer": ARTLIST_ROOT}
     if kind == "clip":
         request = Request(url, headers=headers)

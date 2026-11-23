@@ -943,10 +943,12 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     private var engineUsesModeKeys = false
+    private var engineSupportsArtlist = false
     private var engineSupportsKeychainProxy = false
 
     private func startEngine() {
         engineUsesModeKeys = false
+        engineSupportsArtlist = false
         engineSupportsKeychainProxy = false
         if isUniversalDownload {
             showInstallSheet(stage: "Checking installed tools…")
@@ -955,6 +957,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         var engineError = ""
         let setup = process(["setup"], event: { [weak self] message in
             if message["event"] as? String == "capabilities" {
+                self?.engineSupportsArtlist = message["artlist_preview"] as? Bool == true
                 self?.engineUsesModeKeys = message["mode_keys"] as? Bool == true
                 self?.engineSupportsKeychainProxy = message["proxy_environment"] as? Bool == true
             }
@@ -1216,10 +1219,19 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         addLinks(pasted)
     }
 
+    private func isArtlistLink(_ link: String) -> Bool {
+        guard let host = URL(string: link)?.host?.lowercased() else { return false }
+        return host == "artlist.io" || host.hasSuffix(".artlist.io")
+    }
+
     private func addLinks(_ links: [String]) {
         showCompleted = false
         switchPage()
         for link in links {
+            if isArtlistLink(link) && !engineSupportsArtlist {
+                setFooterStatus(localized("Update the download tools to use Artlist."), error: true)
+                continue
+            }
             if MusicPreview.script != nil && MusicPreview.accepts(link) {
                 addMusic(link)
                 continue
@@ -1650,7 +1662,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             return
         }
         let link = URL(string: item.url)
-        let artlist = ["artlist.io", "www.artlist.io"].contains(link?.host?.lowercased() ?? "")
+        let artlist = isArtlistLink(item.url)
         let path = link?.path ?? ""
         let audio = artlist ? !path.hasPrefix("/stock-footage/clip/") :
             ["MP3", "M4A"].contains(selectedMode) && !item.url.contains("instagram.com/")
