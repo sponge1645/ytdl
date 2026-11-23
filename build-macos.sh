@@ -118,6 +118,22 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 if [[ -n "${YTDL_MUSIC_ENGINE_LIBRARY:-}" && "$variant" == --universal ]]; then
     xcrun lipo "$YTDL_MUSIC_ENGINE_LIBRARY" -verify_arch x86_64 arm64
+    cp music-track-smoke.py "$resources/"
+    notice_dir="$resources/Mornye"
+    mkdir -p "$notice_dir"
+    if [[ -n "${YTDL_MUSIC_ENGINE_SOURCE:-}" ]]; then
+        cp "$YTDL_MUSIC_ENGINE_SOURCE/"{LICENSE,COPYING,NOTICE} "$notice_dir/"
+    fi
+    cat > "$notice_dir/Source.txt" <<'NOTICE'
+This preview uses the separately loaded Mornye desktop engine (LGPL).
+Source and build instructions:
+https://github.com/mornyeapp/Mornye/tree/c4a1c7b812eb135d6e1a295b6b25e11abbd72a7e
+NOTICE
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes array' "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0 dict' "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLName string com.sponge1645.ytdl.music' "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes array' "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string mornye' "$app/Contents/Info.plist"
     mkdir -p "$app/Contents/Frameworks"
     cp "$YTDL_MUSIC_ENGINE_LIBRARY" "$app/Contents/Frameworks/libmornye_desktop.dylib"
 fi

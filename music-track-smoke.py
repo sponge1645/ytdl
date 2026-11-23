@@ -3,6 +3,9 @@ import argparse
 import base64
 import ctypes
 import getpass
+import fcntl
+import os
+import sys
 import hashlib
 import itertools
 import json
@@ -88,7 +91,7 @@ class Engine:
         return result
 
 
-def verify(engine, service):
+def verify(engine, service, gui):
     pending = engine.call("getExtensionPendingAuth", {"extension_id": service})
     url = pending.get("auth_url", "") if isinstance(pending, dict) else ""
     challenge = urlsplit(url)
@@ -99,10 +102,16 @@ def verify(engine, service):
     expected = parse_qs(urlsplit(parse_qs(challenge.query).get("cb", [""])[0]).query).get("state")
     if not expected or len(expected) != 1:
         raise RuntimeError("The verification request did not contain a session state.")
-    subprocess.run(["open", url], check=True)
-    callback = getpass.getpass(
-        "Complete verification in the browser, then paste the final mornye:// return URL here: "
-    ).strip()
+    if gui:
+        print("YTDL_BROWSER_VERIFICATION " + json.dumps({"url": url, "state": expected[0]}), flush=True)
+        callback = sys.stdin.readline().strip()
+    else:
+        subprocess.run(["open", url], check=True)
+        callback = getpass.getpass(
+            "Complete verification in the browser, then paste the final mornye:// return URL here: "
+        ).strip()
+    if not callback:
+        raise RuntimeError("Music verification cancelled.")
     parsed = urlsplit(callback)
     values = parse_qs(parsed.query)
     if ((parsed.scheme, parsed.netloc) != ("mornye", "session-grant")
@@ -114,13 +123,17 @@ def verify(engine, service):
 
 
 def install_package(engine, home, name):
+    package = home / f"{name}.sflx"
+    extension_id = "amazon" if name == "amzn" else name
+    if ((home / "extensions" / extension_id).is_dir() and package.is_file()
+            and hashlib.sha256(package.read_bytes()).hexdigest() == PACKAGES[name]):
+        return
     base = "https://raw.githubusercontent.com/mornyeapp/Mornye-Extension"
     url = f"{base}/{EXTENSION_REVISION}/extensions/{name}.sflx"
     with urlopen(url, timeout=20) as response:
         data = response.read(4 * 1024 * 1024 + 1)
     if hashlib.sha256(data).hexdigest() != PACKAGES[name]:
         raise RuntimeError(f"The {name} extension failed checksum verification.")
-    package = home / f"{name}.sflx"
     package.write_bytes(data)
     result = engine.call("loadExtensionFromPath", {"file_path": str(package)})
     if isinstance(result, dict) and result.get("success") is False:
@@ -201,7 +214,7 @@ def finalize_flac(path, descriptor):
     return destination
 
 
-def run(args, home):
+def run(args, home, master_key):
     provider = metadata_provider(args.url)
     library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
     output = args.output.resolve()
@@ -210,10 +223,11 @@ def run(args, home):
     engine.call("initExtensionSystem", {
         "extensions_dir": str(home / "extensions"),
         "data_dir": str(home / "data"),
-        "master_key": base64.b64encode(secrets.token_bytes(32)).decode(),
+        "master_key": master_key,
         "allowed_directories": [str(output)],
     })
     engine.call("setDownloadDirectory", {"path": str(output)})
+    engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
     install_package(engine, home, provider)
     service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
     package, quality, label = DOWNLOADERS[service]
@@ -236,7 +250,7 @@ def run(args, home):
     }
     result = engine.call("downloadByStrategy", json.dumps(request))
     if isinstance(result, dict) and result.get("error_type") == "verification_required":
-        verify(engine, service)
+        verify(engine, service, args.gui)
         result = engine.call("downloadByStrategy", json.dumps(request))
     if not isinstance(result, dict) or result.get("success") is not True:
         reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
@@ -273,12 +287,23 @@ if __name__ == "__main__":
     parser.add_argument("url", help="Single-track music link")
     parser.add_argument("--source", choices=DOWNLOADERS, help="Override the audio source")
     parser.add_argument("output", type=Path, help="New directory for the test download")
+    parser.add_argument("--gui", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Choose a new output directory so the test cannot match an old file.")
     try:
-        with tempfile.TemporaryDirectory(prefix="ytdl-music-") as home:
-            run(args, Path(home))
+        os.umask(0o077)
+        home = Path.home() / "Library/Application Support/YTDL/Music Preview"
+        home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (home / ".lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError("Another music download is already running.") from None
+            key_path = home / "storage-key"
+            if not key_path.exists():
+                key_path.write_text(base64.b64encode(secrets.token_bytes(32)).decode())
+            run(args, home, key_path.read_text().strip())
     except subprocess.TimeoutExpired:
         parser.exit(1, "FFmpeg finalization timed out. The original was kept.\n")
     except (OSError, RuntimeError, ValueError) as error:

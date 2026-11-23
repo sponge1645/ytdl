@@ -106,6 +106,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     let resources = Bundle.main.resourceURL!
     var downloads: [Download] = []
     var toolsReady = false
+    private let musicPreview = MusicPreview()
     private var preferencesPanel: NativePreferences?
     var folder = UserDefaults.standard.url(forKey: "downloadFolder") ??
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
@@ -121,6 +122,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         prepareTools()
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls { musicPreview.acceptVerification(url) }
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         checkForAppUpdatesAutomatically()
     }
@@ -128,6 +133,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
+        musicPreview.stop()
         for item in downloads {
             if let process = item.process, process.isRunning { process.terminate() }
         }
@@ -149,6 +155,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let file = NSMenuItem()
         file.submenu = NSMenu(title: localized("File"))
         file.submenu?.addItem(withTitle: localized("Paste Link"), action: #selector(pasteLink), keyEquivalent: "v").target = self
+        if MusicPreview.script != nil {
+            file.submenu?.addItem(withTitle: "Download Music…", action: #selector(showMusicPreview),
+                                 keyEquivalent: "").target = self
+        }
         file.submenu?.addItem(.separator())
         file.submenu?.addItem(withTitle: localized("Copy"), action: #selector(copyFile(_:)), keyEquivalent: "").target = self
         file.submenu?.addItem(withTitle: localized("Copy Link"), action: #selector(copyRowLink(_:)), keyEquivalent: "").target = self
@@ -167,6 +177,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         bar.addItem(windows)
         NSApp.windowsMenu = windowMenu
         NSApp.mainMenu = bar
+    }
+
+    @objc private func showMusicPreview() {
+        let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
+        musicPreview.show(defaultFolder: folder, initialURL: clipboard) { [weak self] message in
+            self?.status.stringValue = message
+        }
     }
 
     private func button(_ label: String, _ selector: Selector) -> NSButton {

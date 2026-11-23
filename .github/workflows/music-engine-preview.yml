@@ -2,6 +2,9 @@ name: Build music engine preview
 on:
   push:
     branches: [music-engine-preview]
+concurrency:
+  group: music-engine-preview
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -45,9 +48,18 @@ jobs:
           YTDL_TOOLS_PUBLIC_KEY: ${{ vars.YTDL_TOOLS_PUBLIC_KEY }}
         run: |
           set -euo pipefail
+          export YTDL_MUSIC_ENGINE_SOURCE="$PWD/upstream"
           export YTDL_MUSIC_ENGINE_LIBRARY="$PWD/upstream/rust_backend/target/desktop/macos/libmornye_desktop.dylib"
           python3 preview/music-track-smoke.py --help
           bash preview/build-music-preview.sh
           app="preview/dist/music-preview/YouTube Downloader.app"
           codesign --verify --deep --strict "$app"
           test -f "$app/Contents/Frameworks/libmornye_desktop.dylib"
+          test -f "$app/Contents/Resources/music-track-smoke.py"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$app/Contents/Info.plist")" = mornye
+          ditto -c -k --keepParent "$app" YTDL-Music-Preview.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: YTDL-Music-Preview
+          path: YTDL-Music-Preview.zip
+          if-no-files-found: error

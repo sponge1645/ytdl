@@ -18,6 +18,7 @@ if [[ -z "${YTDL_MUSIC_ENGINE_LIBRARY:-}" ]]; then
     git -C "$work" fetch -q --depth 1 https://github.com/mornyeapp/Mornye.git c4a1c7b812eb135d6e1a295b6b25e11abbd72a7e
     git -C "$work" checkout -q --detach FETCH_HEAD
     (cd "$work" && bash scripts/build_rust_backend.sh desktop)
+    export YTDL_MUSIC_ENGINE_SOURCE="$work"
     export YTDL_MUSIC_ENGINE_LIBRARY="$work/rust_backend/target/desktop/macos/libmornye_desktop.dylib"
 fi
 
