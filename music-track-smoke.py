@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import getpass
 import fcntl
 import os
+import platform
 import sys
 import hashlib
 import itertools
@@ -251,16 +252,19 @@ def resolve_collection(engine, url):
 
 def media_tool(name):
     root = Path.home() / "Library/Application Support/YTDL/tool-kits-v1"
-    current = root / "current"
-    version = current.read_text().strip() if current.is_file() else ""
-    if version.isascii() and version.isdecimal():
-        bundled = root / version / "bin" / name
-        if bundled.is_file():
-            return str(bundled)
+    for kit_root in (root / platform.machine(), root):
+        try:
+            version = (kit_root / "current").read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError):
+            continue
+        if re.fullmatch(r"[1-9][0-9]{0,15}", version):
+            executable = shutil.which(str(kit_root / version / "bin" / name))
+            if executable:
+                return executable
     executable = shutil.which(name)
     if executable:
         return executable
-    raise RuntimeError(f"{name} is missing. Open YTDL to install the download tools.")
+    raise RuntimeError(f"{name} is missing from the active tool kit. Update or reinstall the download tools in YTDL Settings.")
 
 
 DOLBY_FORMATS = {
@@ -275,7 +279,7 @@ FLAC_SOURCES = (*CD_QUALITY_SOURCES, "amazon", "deezer", "beatport")
 UNAVAILABLE_ERRORS = {
     "not_found", "track_not_found", "no_match", "no_results", "unavailable",
     "track_unavailable", "format_unavailable", "quality_unavailable",
-    "unsupported_format", "unsupported_quality",
+    "unsupported_format", "unsupported_quality", "api_error", "timeout",
 }
 
 

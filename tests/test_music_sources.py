@@ -22,6 +22,25 @@ class MusicSourceTests(unittest.TestCase):
     def test_automatic_dolby_tries_other_providers_until_flac_is_found(self):
         self.check_download(None, "track_not_found", ["amazon", "tidal-web", "qobuz-web"], True)
 
+    def test_dolby_provider_errors_allow_automatic_flac(self):
+        for error in ("api_error", "timeout"):
+            with self.subTest(error=error):
+                self.check_download(None, error, ["amazon", "tidal-web", "qobuz-web"], True)
+
+    def test_media_tools_use_active_architecture_kit(self):
+        media_tool = RUN.__globals__["media_tool"]
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            kit = home / "Library/Application Support/YTDL/tool-kits-v1/arm64"
+            bin_dir = kit / "42/bin"
+            bin_dir.mkdir(parents=True)
+            (kit / "current").write_text("42\n", encoding="ascii")
+            with patch.object(Path, "home", return_value=home), patch("platform.machine", return_value="arm64"):
+                for name in ("ffmpeg", "ffprobe"):
+                    tool = bin_dir / name
+                    tool.touch(mode=0o755)
+                    self.assertEqual(media_tool(name), str(tool))
+
     def test_manual_amazon_does_not_fall_back(self):
         self.check_download("amazon", "track_not_found", ["amazon"], False)
 
