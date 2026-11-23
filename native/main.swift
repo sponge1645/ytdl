@@ -1290,7 +1290,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             var needsYouTubeSession = false
             _ = process(["inspect", link], event: { [weak self] message in
                 guard let self = self else { return }
-                if let items = message["items"] as? [[String: Any]] {
+                if message["event"] as? String == "youtube_session_required" {
+                    needsYouTubeSession = true
+                } else if let items = message["items"] as? [[String: Any]] {
                     let added = items.map { Download($0) }
                     for (info, item) in zip(items, added) {
                         item.thumbnailURL = Self.thumbnailURL(info["thumbnail"])
@@ -1308,7 +1310,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     self.refresh()
                 } else if let label = message["status"] as? String {
                     let isError = message["event"] as? String == "error"
-                    needsYouTubeSession = isError && self.isYouTubeSessionError(label, for: link)
+                    needsYouTubeSession = needsYouTubeSession || (isError && self.isYouTubeSessionError(label, for: link))
                     self.setFooterStatus(localized(label), error: isError)
                 }
             }, finish: { [weak self] code in
@@ -1732,6 +1734,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.scheduled = false
         item.status = "Connecting…"
         item.lastError = ""
+        var needsYouTubeSession = false
         item.process = process(["download", String(decoding: data, as: UTF8.self)], event: { [weak self, weak item] message in
             guard let self = self, let item = item else { return }
             switch message["event"] as? String {
@@ -1740,6 +1743,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     let file = URL(fileURLWithPath: path)
                     if !item.files.contains(file) { item.files.append(file) }
                 }
+            case "youtube_session_required":
+                needsYouTubeSession = true
             case "youtube_session":
                 if item.status != "Paused", let label = message["status"] as? String {
                     self.setFooterStatus(localized(label))
@@ -1771,7 +1776,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
             if item.status != "Paused" {
                 if code != 0, !item.didRetryYouTubeSession,
-                   self.isYouTubeSessionError(item.lastError, for: item.url),
+                   needsYouTubeSession || self.isYouTubeSessionError(item.lastError, for: item.url),
                    self.requestYouTubeSession(for: item.url) {
                     self.schedule(item)
                     item.didRetryYouTubeSession = true

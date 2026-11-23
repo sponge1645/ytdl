@@ -29,6 +29,18 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(backend.youtube_cookie_retry("https://youtube.com.evil.test", {"youtube_cookie_browser": "safari"}, error), [])
         self.assertEqual(backend.youtube_cookie_retry("https://youtu.be/example", {}, error), [])
 
+    def test_youtube_off_still_requests_consent(self):
+        error = "ERROR: [youtube] ID: Sign in to confirm you’re not a bot."
+        with patch.object(backend, "tool_path", return_value="yt-dlp"), \
+                patch.object(backend, "read_preferences", return_value={"proxy": "", "youtube_cookie_browser": ""}), \
+                patch.object(backend.subprocess, "run") as run, patch("sys.stdout", new_callable=io.StringIO) as out:
+            run.return_value = subprocess.CompletedProcess([], 1, stdout="", stderr=error)
+            with self.assertRaisesRegex(RuntimeError, "Sign in"):
+                backend.inspect("https://www.youtube.com/watch?v=0ZHnq7V-GXA")
+        run.assert_called_once()
+        self.assertNotIn("--cookies-from-browser", run.call_args.args[0])
+        self.assertEqual(json.loads(out.getvalue())["event"], "youtube_session_required")
+
     def test_instagram_profile_post_link_is_normalized(self):
         with patch.object(backend, "read_preferences", return_value={"proxy": ""}), \
                 patch.object(backend, "download_public_instagram") as download:
