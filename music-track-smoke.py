@@ -12,11 +12,17 @@ import secrets
 import subprocess
 import tempfile
 from urllib.parse import parse_qs, urlsplit
+from urllib.request import urlopen
 from uuid import uuid4
 
 
 CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_uint64, ctypes.c_int32, ctypes.c_void_p, ctypes.c_size_t)
-PACKAGE_SHA256 = "5177325613ad65b9475aa02e8befb651b68a324d465f04869f2906f5f59044ec"
+EXTENSION_REVISION = "a4c27605dfca6e41aae1efe72db6d22d9ca69bfd"
+PACKAGES = {
+    "amzn": "5177325613ad65b9475aa02e8befb651b68a324d465f04869f2906f5f59044ec",
+    "spotify-web": "8ed483f6c451a3af08303b833457de3fa72d8ec8aec1d80bb5f4594c2a303640",
+    "apple-music": "851a498c3030def53dc98af03aff772974f1338f1964ffa367c07cce8c73af07",
+}
 
 
 class Engine:
@@ -95,11 +101,42 @@ def verify(engine):
     engine.call("processPendingExtensionCallbacks", {})
 
 
+def install_package(engine, home, name):
+    base = "https://raw.githubusercontent.com/mornyeapp/Mornye-Extension"
+    url = f"{base}/{EXTENSION_REVISION}/extensions/{name}.sflx"
+    with urlopen(url, timeout=20) as response:
+        data = response.read(4 * 1024 * 1024 + 1)
+    if hashlib.sha256(data).hexdigest() != PACKAGES[name]:
+        raise RuntimeError(f"The {name} extension failed checksum verification.")
+    package = home / f"{name}.sflx"
+    package.write_bytes(data)
+    result = engine.call("loadExtensionFromPath", {"file_path": str(package)})
+    if isinstance(result, dict) and result.get("success") is False:
+        raise RuntimeError(f"The engine could not load {name}.")
+
+
+def metadata_provider(url):
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        raise ValueError("Paste an HTTPS Spotify or Apple Music track link.")
+    if parts.netloc == "open.spotify.com":
+        return "spotify-web"
+    if parts.netloc == "music.apple.com":
+        return "apple-music"
+    raise ValueError("Paste a Spotify or Apple Music track link.")
+
+
+def resolve_track(engine, url):
+    result = engine.call("handleURLWithExtension", {"url": url})
+    track = result.get("track") if isinstance(result, dict) and result.get("type") == "track" else None
+    if not isinstance(track, dict) or not track.get("name") or not track.get("artists"):
+        raise RuntimeError("Could not read one track from this link. Use a track link, not an album or playlist.")
+    return track
+
+
 def run(args, home):
+    provider = metadata_provider(args.url)
     library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
-    package = args.package.resolve()
-    if hashlib.sha256(package.read_bytes()).hexdigest() != PACKAGE_SHA256:
-        raise RuntimeError("The Amazon extension checksum did not match the tested release.")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     engine = Engine(library.resolve(), home)
@@ -109,13 +146,16 @@ def run(args, home):
         "master_key": base64.b64encode(secrets.token_bytes(32)).decode(),
         "allowed_directories": [str(output)],
     })
-    installed = engine.call("loadExtensionFromPath", {"file_path": str(package)})
-    if isinstance(installed, dict) and installed.get("success") is False:
-        raise RuntimeError("The engine could not load the Amazon extension.")
+    install_package(engine, home, provider)
+    install_package(engine, home, "amzn")
+    track = resolve_track(engine, args.url)
+    print(f"Searching Amazon Music for {track['artists']} — {track['name']}", flush=True)
     request = {
         "contract_version": 1, "service": "amazon", "download_provider": "amazon",
-        "source": "amazon", "provider_track_id": args.track_id, "track_name": args.title,
-        "artist_name": args.artist, "output_dir": str(output), "output_ext": "flac",
+        "track_name": track["name"], "artist_name": track["artists"],
+        "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
+        "album_name": track.get("album_name") or "",
+        "output_dir": str(output), "output_ext": "flac",
         "quality": "best", "item_id": str(uuid4()), "use_extensions": True,
         "use_fallback": False, "embed_metadata": True,
     }
@@ -137,10 +177,7 @@ def run(args, home):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path)
-    parser.add_argument("package", type=Path)
-    parser.add_argument("track_id", help="Amazon Music track ID")
-    parser.add_argument("title")
-    parser.add_argument("artist")
+    parser.add_argument("url", help="Spotify or Apple Music single-track link")
     parser.add_argument("output", type=Path, help="New directory for the test download")
     args = parser.parse_args()
     if args.output.exists():
