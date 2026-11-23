@@ -11,6 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          path: preview
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
           repository: mornyeapp/Mornye
           ref: c4a1c7b812eb135d6e1a295b6b25e11abbd72a7e
           persist-credentials: false
@@ -34,3 +38,13 @@ jobs:
               getattr(engine, name)
           print("The macOS runner loaded the desktop engine.")
           PY
+      - name: Package and verify the preview app
+        env:
+          YTDL_TOOLS_PUBLIC_KEY: ${{ vars.YTDL_TOOLS_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          export YTDL_MUSIC_ENGINE_LIBRARY="$PWD/rust_backend/target/desktop/macos/libmornye_desktop.dylib"
+          bash preview/build-music-preview.sh
+          app="preview/dist/music-preview/YouTube Downloader.app"
+          codesign --verify --deep --strict "$app"
+          test -f "$app/Contents/Frameworks/libmornye_desktop.dylib"

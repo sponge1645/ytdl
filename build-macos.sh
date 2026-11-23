@@ -22,6 +22,10 @@ case "$variant" in
         : "${YTDL_TOOLS_PUBLIC_KEY:?Set YTDL_TOOLS_PUBLIC_KEY to build the Universal app}"
         minimum=10.15
         output="$PWD/dist/universal/YouTube Downloader.app"
+        if [[ -n "${YTDL_MUSIC_ENGINE_LIBRARY:-}" ]]; then
+            minimum=11.0
+            output="$PWD/dist/music-preview/YouTube Downloader.app"
+        fi
         ;;
     *) echo "Usage: $0 [--universal|--engine-kit]" >&2; exit 2 ;;
 esac
@@ -36,7 +40,7 @@ compile_app() {
 }
 executable="$app/Contents/MacOS/YouTubeDownloader"
 if [[ "$variant" == --universal ]]; then
-    compile_app x86_64-apple-macos10.15 "$staging/intel"
+    compile_app "x86_64-apple-macos$minimum" "$staging/intel"
     compile_app arm64-apple-macos11.0 "$staging/arm"
     xcrun lipo -create "$staging/intel" "$staging/arm" -output "$executable"
     xcrun lipo "$executable" -verify_arch x86_64 arm64
@@ -112,6 +116,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+if [[ -n "${YTDL_MUSIC_ENGINE_LIBRARY:-}" && "$variant" == --universal ]]; then
+    xcrun lipo "$YTDL_MUSIC_ENGINE_LIBRARY" -verify_arch x86_64 arm64
+    mkdir -p "$app/Contents/Frameworks"
+    cp "$YTDL_MUSIC_ENGINE_LIBRARY" "$app/Contents/Frameworks/libmornye_desktop.dylib"
+fi
 codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
 if [[ -e "$output" ]]; then
@@ -128,7 +137,7 @@ if ! mv "$app" "$output"; then
 fi
 # Refresh this bundle's Launch Services entry without resetting other apps.
 lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [[ -x "$lsregister" ]]; then
+if [[ -x "$lsregister" && -z "${YTDL_MUSIC_ENGINE_LIBRARY:-}" ]]; then
     "$lsregister" -f "$output" || echo "Launch Services registration failed; open the app from Finder." >&2
 fi
 du -sh "$output"
