@@ -1078,7 +1078,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         requestAppUpdate(manual: true)
     }
 
+    private var installingAppUpdate = false
+    private static let skippedAppVersion = "skippedAppVersion"
+
     private func requestAppUpdate(manual: Bool) {
+        guard !installingAppUpdate else { return }
         if manual { showAppUpdateResult = true }
         guard !checkingAppUpdates else { return }
         checkingAppUpdates = true
@@ -1086,49 +1090,121 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         let installed = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
-            var releaseTag: String?
+            var update: AppUpdate?
+            var hasSignedArchive = false
             if (response as? HTTPURLResponse)?.statusCode == 200, let data = data,
                let release = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                let tag = release["tag_name"] as? String,
                tag.range(of: #"^v[0-9]+(\.[0-9]+){1,2}$"#, options: .regularExpression) != nil {
-                releaseTag = tag
+                let candidate = AppUpdate(tag: tag)
+                update = candidate
+                let names = (release["assets"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+                let archive = "Media-Downloader-\(candidate.version).zip"
+                hasSignedArchive = names.contains(archive) && names.contains(archive + ".sig")
             }
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.checkingAppUpdates = false
                 let manual = self.showAppUpdateResult
                 self.showAppUpdateResult = false
+                let defaults = UserDefaults.standard
+                guard let update = update else {
+                    if manual { self.showAppUpdateMessage("Could not check for app updates.") }
+                    return
+                }
+                defaults.set(Date(), forKey: Self.lastAutomaticAppUpdateCheck)
+                guard Self.compareAppVersions(installed, update.version) == .orderedAscending else {
+                    if manual { self.showAppUpdateMessage("You’re up to date.") }
+                    return
+                }
+                if !manual {
+                    guard defaults.string(forKey: Self.skippedAppVersion) != update.version,
+                          NativePreferences.automaticAppUpdateChecksEnabled,
+                          self.window.attachedSheet == nil else { return }
+                }
                 let alert = NSAlert()
-                var releaseURL: URL?
-                if let tag = releaseTag {
-                    UserDefaults.standard.set(Date(), forKey: Self.lastAutomaticAppUpdateCheck)
-                    let version = String(tag.dropFirst())
-                    if App.compareAppVersions(installed, version) == .orderedAscending {
-                        alert.messageText = String(format: localized("Version %@ is available."), version)
-                        releaseURL = URL(string: "https://github.com/sponge1645/ytdl/releases/tag/" + tag)
-                    } else {
-                        guard manual else { return }
-                        alert.messageText = localized("You’re up to date.")
-                    }
-                } else {
-                    guard manual else { return }
-                    alert.messageText = localized("Could not check for app updates.")
-                    releaseURL = URL(string: "https://github.com/sponge1645/ytdl/releases/latest")
-                }
-                if releaseURL != nil { alert.addButton(withTitle: localized("Open Release")) }
-                alert.addButton(withTitle: "OK")
-                if manual {
-                    if alert.runModal() == .alertFirstButtonReturn, let url = releaseURL {
-                        NSWorkspace.shared.open(url)
-                    }
-                } else if NativePreferences.automaticAppUpdateChecksEnabled,
-                          self.window.attachedSheet == nil, let url = releaseURL {
-                    alert.beginSheetModal(for: self.window) { result in
-                        if result == .alertFirstButtonReturn { NSWorkspace.shared.open(url) }
+                alert.messageText = String(format: localized("Version %@ is available."), update.version)
+                alert.addButton(withTitle: localized(hasSignedArchive ? "Install Update" : "Open Release"))
+                alert.addButton(withTitle: localized("Remind Me Later"))
+                alert.addButton(withTitle: localized("Skip This Version"))
+                let respond: (NSApplication.ModalResponse) -> Void = { result in
+                    if result == .alertFirstButtonReturn {
+                        if hasSignedArchive { self.installAppUpdate(update) }
+                        else { NSWorkspace.shared.open(update.releaseURL) }
+                    } else if result == .alertThirdButtonReturn {
+                        defaults.set(update.version, forKey: Self.skippedAppVersion)
                     }
                 }
+                if manual { respond(alert.runModal()) }
+                else { alert.beginSheetModal(for: self.window, completionHandler: respond) }
             }
         }.resume()
+    }
+
+    private func showAppUpdateMessage(_ message: String, release: URL? = nil) {
+        let alert = NSAlert()
+        alert.messageText = localized(message)
+        if release != nil { alert.addButton(withTitle: localized("Open Release")) }
+        alert.addButton(withTitle: "OK")
+        if alert.runModal() == .alertFirstButtonReturn, let release = release {
+            NSWorkspace.shared.open(release)
+        }
+    }
+
+    private var downloadsBusy: Bool {
+        downloads.contains { $0.process != nil || $0.scheduled || $0.retry != nil }
+    }
+
+    private func installAppUpdate(_ update: AppUpdate) {
+        guard !installingAppUpdate else { return }
+        guard !downloadsBusy else {
+            showAppUpdateMessage("Finish or stop downloads before installing the update.")
+            return
+        }
+        installingAppUpdate = true
+        setFooterStatus(localized("Downloading app update…"))
+        update.prepare { result in
+            do {
+                let staged = try result.get()
+                let directory = staged.deletingLastPathComponent()
+                guard !self.downloadsBusy else {
+                    try? FileManager.default.removeItem(at: directory)
+                    self.installingAppUpdate = false
+                    self.setFooterStatus("")
+                    self.showAppUpdateMessage("Finish or stop downloads before installing the update.")
+                    return
+                }
+                let installed = Bundle.main.bundleURL
+                do { try AppUpdate.swap(staged, with: installed) }
+                catch {
+                    try? FileManager.default.removeItem(at: directory)
+                    throw error
+                }
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.createsNewApplicationInstance = true
+                NSWorkspace.shared.openApplication(at: installed, configuration: configuration) { app, error in
+                    DispatchQueue.main.async {
+                        if app != nil && error == nil {
+                            try? FileManager.default.removeItem(at: directory)
+                            NSApp.terminate(nil)
+                        } else {
+                            if (try? AppUpdate.swap(staged, with: installed)) != nil {
+                                try? FileManager.default.removeItem(at: directory)
+                            }
+                            self.appUpdateFailed(update)
+                        }
+                    }
+                }
+            } catch {
+                self.appUpdateFailed(update)
+            }
+        }
+    }
+
+    private func appUpdateFailed(_ update: AppUpdate) {
+        installingAppUpdate = false
+        setFooterStatus("")
+        showAppUpdateMessage("Could not install the app update.", release: update.releaseURL)
     }
 
     private static func compareAppVersions(_ first: String, _ second: String) -> ComparisonResult {

@@ -3,6 +3,7 @@
 - The app is now called Media Downloader. Replace the old YouTube Downloader app in Applications to avoid keeping two copies.
 - Download individual tracks and expand music albums and playlists into the download queue. The selected source and track determine which audio formats are available.
 - Save music with tags and embedded cover artwork when available. Reinstall Spotify and Apple Music extensions from Settings, and paste a verification return link into the app if Safari does not return automatically.
+- Install signed app updates from the update dialog, defer a reminder, or skip a version. If you already have 1.1 installed, download this refreshed 1.1 archive once to enable in-app installation for future versions.
 - Add YouTube videos to the queue directly from Safari with the Download button.
 - Use an existing Safari, Chrome, or Firefox session if YouTube requests sign-in. Safari may require Full Disk Access.
 - Download available Artlist audio and video previews with the updated tool kit.

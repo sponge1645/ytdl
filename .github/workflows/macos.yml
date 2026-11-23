@@ -83,6 +83,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          SIGNING_KEY: ${{ secrets.YTDL_TOOLS_SIGNING_KEY }}
+          PUBLIC_KEY: ${{ vars.YTDL_TOOLS_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           : "${GH_TOKEN:?Missing release publishing token}"
@@ -91,10 +93,19 @@ jobs:
           cd release
           zip="Media-Downloader-$version.zip"
           sha256sum --check "$zip.sha256"
+          umask 077
+          key="$(mktemp)"
+          public="$(mktemp)"
+          trap 'rm -f "$key" "$public"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key"
+          printf '%s\n' "$PUBLIC_KEY" > "$public"
+          openssl dgst -sha256 -sign "$key" -out "$zip.sig" "$zip"
+          openssl dgst -sha256 -verify "$public" -signature "$zip.sig" "$zip"
           gh release view "$tag" >/dev/null 2>&1 ||
             gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Media Downloader $version" --notes-file ../RELEASE_NOTES.md
-          gh release upload "$tag" "$zip" "$zip.sha256" --clobber
+          gh release upload "$tag" "$zip" "$zip.sha256" "$zip.sig" --clobber
           gh release edit "$tag" --title "Media Downloader $version" --notes-file ../RELEASE_NOTES.md --draft=false --latest
           assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
           grep -Fxq "$zip" <<< "$assets"
           grep -Fxq "$zip.sha256" <<< "$assets"
+          grep -Fxq "$zip.sig" <<< "$assets"
