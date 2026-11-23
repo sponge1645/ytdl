@@ -24,6 +24,9 @@ from uuid import uuid4
 CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_uint64, ctypes.c_int32, ctypes.c_void_p, ctypes.c_size_t)
 EXTENSION_REVISION = "a4c27605dfca6e41aae1efe72db6d22d9ca69bfd"
 PACKAGES = {
+    "ytmusic-spotiflac": "40b10518b9d4408b7ffea3a20dfc17bf10551b6199fcdee26dcd05d931191125",
+    "jiosaavn": "e35852c5ced6b0ea651eea0867c5dac46c79482c4ae4602185186621b4044887",
+    "beatport": "7fba6952241cd3b03e115297771953d77889e0c322780a0357e0d3a08956dcb3",
     "tidal-web": "fcd7a0ca4dda3dacd688c6962db218f89dd165d5449c640e71a0b1bf24847cce",
     "qobuz-web": "c29bdf9f816e5eaab5956552f7236be9b18e89255ce2c39b7681d24f358cde97",
     "deezer": "86f3efb1068c2cc07fe197de623962e6d35c171669a732c72cb4c6be77cf43d2",
@@ -33,6 +36,9 @@ PACKAGES = {
 }
 
 DOWNLOADERS = {
+    "ytmusic-spotiflac": ("ytmusic-spotiflac", "m4a", "YouTube Music"),
+    "jiosaavn": ("jiosaavn", "AAC_320", "JioSaavn"),
+    "beatport": ("beatport", "LOSSLESS", "Beatport"),
     "amazon": ("amzn", "best", "Amazon Music"),
     "tidal-web": ("tidal-web", "HI_RES_LOSSLESS", "Tidal"),
     "qobuz-web": ("qobuz-web", "HI_RES_LOSSLESS", "Qobuz"),
@@ -144,6 +150,12 @@ def metadata_provider(url):
     parts = urlsplit(url)
     if parts.scheme != "https":
         raise ValueError("Paste an HTTPS music track link.")
+    if parts.hostname in ('beatport.com', 'www.beatport.com'):
+        return "beatport"
+    if parts.hostname in ('jiosaavn.com', 'www.jiosaavn.com'):
+        return "jiosaavn"
+    if parts.hostname in ('music.youtube.com',):
+        return "ytmusic-spotiflac"
     if parts.netloc == "open.spotify.com":
         return "spotify-web"
     if parts.netloc == "music.apple.com":
@@ -162,7 +174,7 @@ def metadata_provider(url):
     raise ValueError("This music catalog is not supported by the preview.")
 
 
-TRACK_FIELDS = ("name", "artists", "isrc", "duration_ms", "album_name", "cover_url",
+TRACK_FIELDS = ("id", "spotify_id", "name", "artists", "isrc", "duration_ms", "album_name", "cover_url",
                 "track_number", "disc_number", "total_tracks", "total_discs")
 
 
@@ -171,7 +183,7 @@ def track_metadata(track, fallback_cover=""):
             isinstance(track.get(field), str) and track[field].strip() for field in ("name", "artists")):
         return None
     metadata = {field: track[field] for field in TRACK_FIELDS if field in track}
-    metadata["cover_url"] = metadata.get("cover_url") or track.get("cover_art") or fallback_cover
+    metadata["cover_url"] = metadata.get("cover_url") or track.get("cover_art") or track.get("images") or fallback_cover
     return metadata
 
 
@@ -185,8 +197,12 @@ def resolve_collection(engine, url):
         collection = result.get(kind) or {}
         entries = result.get("tracks") or collection.get("tracks") or result.get("track_list") or []
         cover = result.get("cover_url") or collection.get("cover_url") or ""
+    elif kind == "artist":
+        artist = result.get("artist") or {}
+        entries = artist.get("top_tracks") or result.get("tracks") or []
+        cover = artist.get("image_url") or ""
     else:
-        raise RuntimeError("Use a supported track, album or playlist link.")
+        raise RuntimeError("Use a supported track, album, playlist or artist link.")
     tracks = []
     for entry in entries:
         metadata = track_metadata(entry, cover)
@@ -302,7 +318,12 @@ def run(args, home, master_key):
     service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
     package, quality, label = DOWNLOADERS[service]
     dolby = DOLBY_FORMATS.get(args.format)
-    extension = ".flac"
+    compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and args.format == "M4A")
+    if compressed and args.format not in {"M4A", "MP3"}:
+        raise RuntimeError("Choose M4A or MP3 for this source.")
+    if compressed and service == "beatport":
+        quality = "HIGH"
+    extension = ".m4a" if compressed else ".flac"
     if args.format == "FLAC-CD":
         if service not in {"tidal-web", "qobuz-web"}:
             raise RuntimeError("This source does not offer a separate CD-quality request.")
@@ -327,6 +348,10 @@ def run(args, home, master_key):
         "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
         "use_fallback": False, "embed_metadata": True,
     }
+    if service == provider and service in {"beatport", "jiosaavn", "ytmusic-spotiflac"}:
+        request["provider_track_id"] = track.get("id") or ""
+    if provider == "spotify-web":
+        request["spotify_id"] = track.get("spotify_id") or track.get("id") or ""
     for field in ("track_number", "disc_number", "total_tracks", "total_discs"):
         value = track.get(field)
         if type(value) is int and value > 0:
@@ -352,6 +377,13 @@ def run(args, home, master_key):
     descriptor = result.get("decryption")
     if dolby:
         path = finalize_dolby(path, descriptor, extension, expected_codec)
+    elif compressed:
+        probe = subprocess.run([media_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
+                                "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", str(path)],
+                               capture_output=True, text=True, check=True, timeout=30)
+        input_codec = probe.stdout.strip()
+        if not input_codec:
+            raise RuntimeError("The source did not return a readable audio stream.")
     else:
         if isinstance(descriptor, dict) and descriptor.get("key"):
             path = finalize_flac(path, descriptor)
@@ -368,7 +400,8 @@ def run(args, home, master_key):
     if args.gui:
         if args.format in {"MP3", "M4A"}:
             converted = output / f"converted.{args.format.lower()}"
-            codec = ["-c:a", "aac", "-b:a", "256k"] if args.format == "M4A" else [
+            aac_codec = ["-c:a", "copy"] if compressed and input_codec == "aac" else ["-c:a", "aac", "-b:a", "256k"]
+            codec = aac_codec if args.format == "M4A" else [
                 "-c:a", "libmp3lame", "-b:a", "320k",
             ]
             subprocess.run([media_tool("ffmpeg"), "-nostdin", "-v", "error", "-xerror",

@@ -112,7 +112,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private weak var musicSelection: Download?
     private var previousMode = 0
     private var previousFormat = "best"
-    private let musicSources = ["", "amazon", "tidal-web", "qobuz-web", "deezer"]
+    private let musicSources = ["", "amazon", "tidal-web", "qobuz-web", "deezer", "ytmusic-spotiflac", "beatport", "jiosaavn"]
     var showCompleted = false
     var sidebarSelection: [NSBox] = []
     let temp = FileManager.default.temporaryDirectory.appendingPathComponent("ytdl-native-" + UUID().uuidString)
@@ -374,7 +374,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let width = quality.widthAnchor.constraint(equalToConstant: 160)
         width.isActive = true
         qualityWidth = width
-        musicSource.addItems(withTitles: [localized("Automatic"), "Amazon Music", "Tidal", "Qobuz", "Deezer"])
+        musicSource.addItems(withTitles: [localized("Automatic"), "Amazon Music", "Tidal", "Qobuz", "Deezer", "YouTube Music", "Beatport", "JioSaavn"])
         musicSource.toolTip = localized("Audio source")
         musicSource.target = self
         musicSource.action = #selector(changeMusicSource)
@@ -419,8 +419,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         ])
         let hint = [
             localized("Public links from YouTube, Vimeo, TikTok, SoundCloud, Instagram and more"),
+            MusicPreview.script == nil ? nil : localized("Music links from Spotify, Apple Music, YouTube Music, Beatport, JioSaavn, Amazon Music, Tidal, Qobuz and Deezer"),
             localized("Drop a link here or press ⌘V")
-        ].joined(separator: "\n")
+        ].compactMap { $0 }.joined(separator: "\n")
         let emptyContent = NSMutableAttributedString(attributedString: heading)
         emptyContent.append(NSAttributedString(string: "\n\n" + hint, attributes: [
             .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor
@@ -1026,7 +1027,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             .compactMap { ($0 as? NSURL)?.absoluteString } ?? []
         let text = pasteboard.string(forType: .string) ?? ""
         var seen = Set<String>()
-        return (urls + text.split(whereSeparator: { $0.isWhitespace }).map(String.init)).filter {
+        return (urls + text.split(whereSeparator: { $0.isWhitespace }).map(String.init)).map { MusicPreview.script == nil ? $0 : MusicPreview.normalizedLink($0) }.filter {
             guard let url = URL(string: $0), let scheme = url.scheme?.lowercased(),
                   ["http", "https"].contains(scheme), url.host != nil else { return false }
             return seen.insert($0).inserted
@@ -1106,6 +1107,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private func addMusic(_ link: String) {
         let item = Download(["url": link])
         item.music = true
+        item.musicFormat = defaultMusicFormat(for: item)
         downloads.append(item)
         refresh()
         if let row = rows.firstIndex(where: { $0 === item }) {
@@ -1230,7 +1232,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             item.musicSource = musicSource.indexOfSelectedItem
             for row in pendingMusicGroup(for: item) {
                 row.musicSource = item.musicSource
-                if !formatChoices.contains(row.musicFormat) { row.musicFormat = "FLAC" }
+                if !formatChoices.contains(row.musicFormat) { row.musicFormat = defaultMusicFormat(for: row) }
             }
             changeMode()
         }
@@ -1240,15 +1242,22 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let index = item.musicSource
         if musicSources.indices.contains(index), index > 0 { return musicSources[index] }
         guard let host = URL(string: item.url)?.host else { return "amazon" }
+        if host == "music.youtube.com" { return "ytmusic-spotiflac" }
+        if host == "beatport.com" || host == "www.beatport.com" { return "beatport" }
+        if host == "jiosaavn.com" || host == "www.jiosaavn.com" { return "jiosaavn" }
         if host == "tidal.com" || host.hasSuffix(".tidal.com") { return "tidal-web" }
         if host == "qobuz.com" || host.hasSuffix(".qobuz.com") { return "qobuz-web" }
         if host == "deezer.com" || host.hasSuffix(".deezer.com") || host == "deezer.page.link" { return "deezer" }
         return "amazon"
     }
 
+    private func defaultMusicFormat(for item: Download) -> String {
+        ["ytmusic-spotiflac", "jiosaavn"].contains(effectiveSource(for: item)) ? "M4A" : "FLAC"
+    }
+
     private var formatChoices: [String] {
         if let item = musicSelection {
-            var choices = ["FLAC"]
+            var choices = defaultMusicFormat(for: item) == "FLAC" ? ["FLAC"] : []
             let source = effectiveSource(for: item)
             if source == "tidal-web" || source == "qobuz-web" { choices.append("FLAC-CD") }
             choices.append("M4A")
@@ -1270,7 +1279,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private func formatLabel(_ format: String) -> String {
         guard let item = musicSelection else { return format == "best" ? localized("Best available") : format }
         switch format {
-        case "FLAC": return effectiveSource(for: item) == "deezer" ? "FLAC (Lossless)" : "FLAC (Hi-Res)"
+        case "FLAC": return ["deezer", "beatport"].contains(effectiveSource(for: item)) ? "FLAC (Lossless)" : "FLAC (Hi-Res)"
         case "FLAC-CD": return "FLAC (Lossless)"
         case "M4A": return "M4A (AAC)"
         case "M4A-DDP": return "M4A (Dolby Digital Plus)"

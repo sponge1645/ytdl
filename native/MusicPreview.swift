@@ -16,9 +16,18 @@ final class MusicPreview {
         if let task = task, task.isRunning { task.terminate() }
     }
 
+    static func normalizedLink(_ link: String) -> String {
+        let parts = link.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].lowercased() == "spotify",
+              ["track", "album", "playlist", "artist"].contains(String(parts[1])),
+              String(parts[2]).range(of: "^[A-Za-z0-9]{22}$", options: .regularExpression) != nil else { return link }
+        return "https://open.spotify.com/\(parts[1])/\(parts[2])"
+    }
+
     static func accepts(_ link: String) -> Bool {
         guard let url = URL(string: link), url.scheme == "https", let host = url.host else { return false }
-        return ["open.spotify.com", "music.apple.com", "tidal.com", "www.tidal.com", "listen.tidal.com",
+        return ["music.youtube.com", "beatport.com", "www.beatport.com", "jiosaavn.com", "www.jiosaavn.com",
+                "open.spotify.com", "music.apple.com", "tidal.com", "www.tidal.com", "listen.tidal.com",
                 "qobuz.com", "www.qobuz.com", "play.qobuz.com", "open.qobuz.com",
                 "deezer.com", "www.deezer.com", "link.deezer.com", "deezer.page.link"].contains(host)
             || ["com", "co.uk", "de", "co.jp", "fr", "it", "es", "in", "com.br", "com.mx", "com.au", "co"]
