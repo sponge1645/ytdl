@@ -2,6 +2,7 @@
 import argparse
 import base64
 import ctypes
+from contextlib import contextmanager
 import getpass
 import fcntl
 import os
@@ -101,7 +102,14 @@ class Engine:
             self.lib.mornye_cancel(call_id)
             raise RuntimeError(f"{method} timed out.") from None
         if reply_id != call_id or kind != 0:
-            raise RuntimeError(f"The engine rejected {method} (callback kind {kind}).")
+            detail = ""
+            try:
+                error = json.loads(data)
+                if isinstance(error, dict) and isinstance(error.get("message"), str):
+                    detail = " ".join(error["message"].split())[:500]
+            except ValueError:
+                pass
+            raise RuntimeError(f"{method}: {detail or f'callback kind {kind}'}")
         result = json.loads(data)
         if isinstance(result, str):
             try:
@@ -342,15 +350,14 @@ def write_metadata(source, destination, track, codec):
     return destination
 
 
-def run(args, home):
-    provider = metadata_provider(args.url)
-    library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
-    output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
-    package, quality, label = DOWNLOADERS[service]
+@contextmanager
+def open_music_engine(library, home, output):
     with (home / ".lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Waiting for the music engine to become available…", flush=True)
+            fcntl.flock(lock, fcntl.LOCK_EX)
         key_path = home / "storage-key"
         if not key_path.exists():
             key_path.write_text(base64.b64encode(secrets.token_bytes(32)).decode())
@@ -361,69 +368,84 @@ def run(args, home):
             "master_key": key_path.read_text().strip(),
             "allowed_directories": [str(output)],
         })
+        try:
+            yield engine
+        finally:
+            engine.progress_item = None
+            engine.call("cleanupExtensions", {})
+
+
+def run(args, home):
+    provider = metadata_provider(args.url)
+    library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
+    package, quality, label = DOWNLOADERS[service]
+    with open_music_engine(library, home, output) as engine:
         engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
         if not args.track_json:
             install_package(engine, home, provider)
         if not args.inspect and (args.track_json or package != provider):
             install_package(engine, home, package)
-    if args.track_json:
-        track = track_metadata(json.loads(args.track_json))
-        if not track:
-            raise RuntimeError("The queued track has invalid metadata.")
-    else:
-        kind, tracks, skipped = resolve_collection(engine, args.url)
-        if args.inspect:
-            print("YTDL_METADATA " + json.dumps({"kind": kind, "tracks": tracks, "skipped": skipped}))
-            return
-        if kind != "track":
-            raise RuntimeError("Add the album or playlist to the app queue to download its tracks.")
-        track = tracks[0]
-    cover = track["cover_url"]
-    engine.call("setDownloadDirectory", {"path": str(output)})
-    dolby = DOLBY_FORMATS.get(args.format)
-    compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and args.format == "M4A")
-    if compressed and args.format not in {"M4A", "MP3"}:
-        raise RuntimeError("Choose M4A or MP3 for this source.")
-    if compressed and service == "beatport":
-        quality = "HIGH"
-    extension = ".m4a" if compressed else ".flac"
-    if args.format == "FLAC-CD":
-        if service not in {"tidal-web", "qobuz-web"}:
-            raise RuntimeError("This source does not offer a separate CD-quality request.")
-        quality = "LOSSLESS"
-    if dolby:
-        required_source, quality, extension, expected_codec = dolby
-        if service != required_source:
-            raise RuntimeError("The selected Dolby format is unavailable from this source.")
-    print(f"Searching {label} for {track['artists']} — {track['name']}", flush=True)
-    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
-    stem = " ".join(stem.split()).strip(". ")
-    stem = stem.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(". ") or "Track"
-    request = {
-        "contract_version": 1, "service": service, "download_provider": service,
-        "track_name": track["name"], "artist_name": track["artists"],
-        "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
-        "album_name": track.get("album_name") or "", "cover_url": cover,
-        "output_dir": str(output), "output_path": str(output / f"{stem}{extension}"),
-        "output_ext": extension,
-        "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
-        "use_fallback": False, "embed_metadata": True,
-    }
-    if service == provider and service in {"beatport", "jiosaavn", "ytmusic-spotiflac"}:
-        request["provider_track_id"] = track.get("id") or ""
-    if provider == "spotify-web":
-        request["spotify_id"] = track.get("spotify_id") or track.get("id") or ""
-    for field in ("track_number", "disc_number", "total_tracks", "total_discs"):
-        value = track.get(field)
-        if type(value) is int and value > 0:
-            request[field] = value
-    if args.gui:
-        engine.progress_item = request["item_id"]
-        engine.lib.mornye_subscribe(10)
-    result = engine.call("downloadByStrategy", json.dumps(request))
-    if isinstance(result, dict) and result.get("error_type") == "verification_required":
-        verify(engine, service, args.gui)
+        if args.track_json:
+            track = track_metadata(json.loads(args.track_json))
+            if not track:
+                raise RuntimeError("The queued track has invalid metadata.")
+        else:
+            kind, tracks, skipped = resolve_collection(engine, args.url)
+            if args.inspect:
+                print("YTDL_METADATA " + json.dumps({"kind": kind, "tracks": tracks, "skipped": skipped}))
+                return
+            if kind != "track":
+                raise RuntimeError("Add the album or playlist to the app queue to download its tracks.")
+            track = tracks[0]
+        cover = track["cover_url"]
+        engine.call("setDownloadDirectory", {"path": str(output)})
+        dolby = DOLBY_FORMATS.get(args.format)
+        compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and args.format == "M4A")
+        if compressed and args.format not in {"M4A", "MP3"}:
+            raise RuntimeError("Choose M4A or MP3 for this source.")
+        if compressed and service == "beatport":
+            quality = "HIGH"
+        extension = ".m4a" if compressed else ".flac"
+        if args.format == "FLAC-CD":
+            if service not in {"tidal-web", "qobuz-web"}:
+                raise RuntimeError("This source does not offer a separate CD-quality request.")
+            quality = "LOSSLESS"
+        if dolby:
+            required_source, quality, extension, expected_codec = dolby
+            if service != required_source:
+                raise RuntimeError("The selected Dolby format is unavailable from this source.")
+        print(f"Searching {label} for {track['artists']} — {track['name']}", flush=True)
+        stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
+        stem = " ".join(stem.split()).strip(". ")
+        stem = stem.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(". ") or "Track"
+        request = {
+            "contract_version": 1, "service": service, "download_provider": service,
+            "track_name": track["name"], "artist_name": track["artists"],
+            "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
+            "album_name": track.get("album_name") or "", "cover_url": cover,
+            "output_dir": str(output), "output_path": str(output / f"{stem}{extension}"),
+            "output_ext": extension,
+            "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
+            "use_fallback": False, "embed_metadata": True,
+        }
+        if service == provider and service in {"beatport", "jiosaavn", "ytmusic-spotiflac"}:
+            request["provider_track_id"] = track.get("id") or ""
+        if provider == "spotify-web":
+            request["spotify_id"] = track.get("spotify_id") or track.get("id") or ""
+        for field in ("track_number", "disc_number", "total_tracks", "total_discs"):
+            value = track.get(field)
+            if type(value) is int and value > 0:
+                request[field] = value
+        if args.gui:
+            engine.progress_item = request["item_id"]
+            engine.lib.mornye_subscribe(10)
         result = engine.call("downloadByStrategy", json.dumps(request))
+        if isinstance(result, dict) and result.get("error_type") == "verification_required":
+            verify(engine, service, args.gui)
+            result = engine.call("downloadByStrategy", json.dumps(request))
     if not isinstance(result, dict) or result.get("success") is not True:
         reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
         raise RuntimeError(f"{label} did not complete the test download ({reason}).")
