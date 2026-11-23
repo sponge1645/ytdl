@@ -1,16 +1,23 @@
 import AppKit
 import Darwin
+import ImageIO
 import UserNotifications
 
 private final class Download {
     let id = UUID()
     let url: String
-    let title: String
+    var title: String
     let index: Int?
     var startedMode: String?
+    var music = false
+    var musicTrackJSON: String?
+    var inspectingMusic = false
+    var musicCollection: UUID?
+    var musicFormat = "FLAC"
+    var musicSource = 0
     var status = "Waiting"
     var progress: Double?
-    var image: NSImage?
+    var thumbnailURL: URL?
     var retry: DispatchWorkItem?
     var retryCount = 0
     var lastError = ""
@@ -58,9 +65,45 @@ private final class DropZoneIcon: NSView {
     }
 }
 
+private final class QueueTitleCell: NSStackView {
+    let thumbnail = NSImageView()
+    let caption = NSTextField(labelWithString: "")
+    var thumbnailURL: URL?
+
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+        thumbnail.imageScaling = .scaleProportionallyUpOrDown
+        thumbnail.wantsLayer = true
+        thumbnail.layer?.cornerRadius = 6
+        thumbnail.layer?.masksToBounds = true
+        thumbnail.widthAnchor.constraint(equalToConstant: 84).isActive = true
+        thumbnail.heightAnchor.constraint(equalToConstant: 47.25).isActive = true
+        caption.font = .systemFont(ofSize: 13, weight: .semibold)
+        caption.lineBreakMode = .byTruncatingTail
+        caption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addArrangedSubview(thumbnail)
+        addArrangedSubview(caption)
+        spacing = 10
+        alignment = .centerY
+    }
+
+    required init?(coder: NSCoder) { fatalError("QueueTitleCell is created in code") }
+}
+
 private final class DownloadTable: NSTableView, NSMenuItemValidation {
     var rowMenu: ((Int) -> NSMenu?)?
     var selectedFiles: (() -> [URL])?
+    var removeSelection: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if (event.keyCode == 51 || event.keyCode == 117), !selectedRowIndexes.isEmpty,
+           event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
+            removeSelection?()
+            return
+        }
+        super.keyDown(with: event)
+    }
 
     @objc(copy:) func copySelectedFiles(_ sender: Any?) {
         writeFilesToPasteboard(selectedFiles?() ?? [])
@@ -88,6 +131,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
     let table = DownloadTable()
+    private var displayedRows: [Download] = []
+    private var displayedRowIDs: [UUID] = []
+    private let thumbnails = NSCache<NSURL, NSImage>()
+    private var thumbnailRequests: Set<URL> = []
+    private var thumbnailFailures: Set<URL> = []
+    private var dirtyStatusRows: Set<UUID> = []
+    private var refreshingRows = false
     private var logWindow: NSWindow?
     private var logTextView: NSTextView?
     private var logLines: [String] = []
@@ -100,18 +150,28 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     let empty = EmptyQueueView()
     let mode = NSSegmentedControl(labels: [localized("Video"), localized("Audio")], trackingMode: .selectOne, target: nil, action: nil)
     let quality = NSPopUpButton()
+    private var qualityWidth: NSLayoutConstraint?
+    private var sharedAudioFormat: String?
+    private var queuedMusicFormat: String?
+    let musicSource = NSPopUpButton()
+    private weak var musicSelection: Download?
+    private var previousMode = 0
+    private var previousFormat = "best"
+    private let musicSources = ["", "amazon", "tidal-web", "qobuz-web", "deezer", "ytmusic-spotiflac", "beatport", "jiosaavn"]
     var showCompleted = false
     var sidebarSelection: [NSBox] = []
     let temp = FileManager.default.temporaryDirectory.appendingPathComponent("ytdl-native-" + UUID().uuidString)
     let resources = Bundle.main.resourceURL!
     var downloads: [Download] = []
     var toolsReady = false
+    private let musicPreview = MusicPreview()
+    private var pendingSafariLinks: [String] = []
     private var preferencesPanel: NativePreferences?
     var folder = UserDefaults.standard.url(forKey: "downloadFolder") ??
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
 
     var rows: [Download] {
-        downloads.filter { $0.done == showCompleted }
+        downloads.filter { $0.done == showCompleted && !$0.pendingRemoval }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -121,6 +181,27 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         prepareTools()
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls { musicPreview.acceptVerification(url) }
+        let links = urls.compactMap { url -> String? in
+            guard url.scheme == "ytdl", url.host == "youtube",
+                  url.user == nil, url.password == nil, url.port == nil,
+                  url.query == nil, url.fragment == nil,
+                  url.path.hasPrefix("/video/") else { return nil }
+            let id = String(url.path.dropFirst("/video/".count))
+            guard id.utf8.count == 11,
+                  id.range(of: #"^[A-Za-z0-9_-]{11}$"#, options: .regularExpression) != nil else { return nil }
+            return "https://www.youtube.com/watch?v=" + id
+        }
+        guard !links.isEmpty else { return }
+        if toolsReady {
+            window.makeKeyAndOrderFront(nil)
+            addLinks(links)
+        } else {
+            pendingSafariLinks.append(contentsOf: links)
+        }
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         checkForAppUpdatesAutomatically()
     }
@@ -128,6 +209,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
+        musicPreview.stop()
         for item in downloads {
             if let process = item.process, process.isRunning { process.terminate() }
         }
@@ -352,12 +434,22 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         changeMode()
         let qualityDivider = separator(vertical: true)
         qualityDivider.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        quality.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        let controls = NSStackView(views: [title, NSView(), mode, qualityDivider, quality])
+        let width = quality.widthAnchor.constraint(equalToConstant: 160)
+        width.isActive = true
+        qualityWidth = width
+        musicSource.addItems(withTitles: [localized("Automatic"), "Amazon Music", "Tidal", "Qobuz", "Deezer", "YouTube Music", "Beatport", "JioSaavn"])
+        musicSource.toolTip = localized("Audio source")
+        musicSource.target = self
+        musicSource.action = #selector(changeMusicSource)
+        musicSource.isHidden = true
+        let controls = NSStackView(views: [title, NSView(), mode, qualityDivider, quality, musicSource])
         controls.alignment = .centerY
         controls.spacing = 10
 
+        thumbnails.countLimit = 256
         table.dataSource = self
+        table.allowsMultipleSelection = true
+        table.removeSelection = { [weak self] in self?.removeSelectedRows() }
         table.delegate = self
         table.registerForDraggedTypes([.URL, .string])
         table.setDraggingSourceOperationMask(.copy, forLocal: false)
@@ -373,8 +465,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         table.rowHeight = 58
         table.usesAlternatingRowBackgroundColors = false
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
-        for (key, label, width) in [("title", "Title", 300.0), ("format", "Format", 58.0),
-                                     ("status", "Status", 190.0), ("action", "", 78.0)] {
+        for (key, label, width) in [("title", "Title", 335.0), ("format", "Format", 58.0),
+                                     ("status", "Status", 155.0), ("action", "", 78.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(key))
             column.title = localized(label)
             column.width = CGFloat(width)
@@ -391,10 +483,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let heading = NSAttributedString(string: localized("No downloads yet"), attributes: [
             .font: NSFont.systemFont(ofSize: 22, weight: .semibold), .foregroundColor: NSColor.labelColor
         ])
-        let hint = [
-            localized("Public links from YouTube, Vimeo, TikTok, SoundCloud, Instagram and more"),
-            localized("Drop a link here or press ⌘V")
-        ].joined(separator: "\n")
+        let hint = MusicPreview.script == nil
+            ? localized("Paste or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, TikTok, SoundCloud, Instagram and more (⌘V).")
+            : localized("Paste or drop a link from YouTube, Vimeo, OK.ru, VK, Rutube, Spotify, Apple Music, YouTube Music, SoundCloud, TikTok, Instagram, Amazon Music, Tidal, Qobuz, Deezer, Beatport, JioSaavn and more (⌘V).")
         let emptyContent = NSMutableAttributedString(attributedString: heading)
         emptyContent.append(NSAttributedString(string: "\n\n" + hint, attributes: [
             .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor
@@ -821,6 +912,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                         self.appendLog(message)
                     }
                 }
+                if !self.pendingSafariLinks.isEmpty {
+                    let links = self.pendingSafariLinks
+                    self.pendingSafariLinks.removeAll()
+                    self.addLinks(links)
+                }
                 self.checkForAppUpdatesAutomatically()
             }
         })
@@ -1000,7 +1096,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             .compactMap { ($0 as? NSURL)?.absoluteString } ?? []
         let text = pasteboard.string(forType: .string) ?? ""
         var seen = Set<String>()
-        return (urls + text.split(whereSeparator: { $0.isWhitespace }).map(String.init)).filter {
+        return (urls + text.split(whereSeparator: { $0.isWhitespace }).map(String.init)).map { MusicPreview.script == nil ? $0 : MusicPreview.normalizedLink($0) }.filter {
             guard let url = URL(string: $0), let scheme = url.scheme?.lowercased(),
                   ["http", "https"].contains(scheme), url.host != nil else { return false }
             return seen.insert($0).inserted
@@ -1028,6 +1124,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func pasteLink() {
+        if let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let url = URL(string: text), url.scheme?.lowercased() == "mornye" {
+            if !musicPreview.acceptVerification(url) {
+                status.stringValue = localized("This return link does not match an active verification. Retry the track for a new link.")
+            }
+            return
+        }
         guard toolsReady else { NSSound.beep(); return }
         let pasted = links(from: NSPasteboard.general)
         guard !pasted.isEmpty else { status.stringValue = localized("Copy an HTTP or HTTPS link first."); return }
@@ -1038,11 +1141,19 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         showCompleted = false
         switchPage()
         for link in links {
+            if MusicPreview.script != nil && MusicPreview.accepts(link) {
+                addMusic(link)
+                continue
+            }
+            showMusicControls(for: nil)
             status.stringValue = localized("Reading link…")
             _ = process(["inspect", link], event: { [weak self] message in
                 guard let self = self else { return }
                 if let items = message["items"] as? [[String: Any]] {
                     let added = items.map { Download($0) }
+                    for (info, item) in zip(items, added) {
+                        item.thumbnailURL = Self.thumbnailURL(info["thumbnail"])
+                    }
                     self.downloads.append(contentsOf: added)
                     if let first = added.first {
                         self.notify("Links added", body: added.count == 1 ? first.title : itemCount(added.count),
@@ -1054,17 +1165,6 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     }
                     if self.status.stringValue == localized("Reading link…") { self.status.stringValue = "" }
                     self.refresh()
-                    for (info, item) in zip(items, added) {
-                        guard let raw = info["thumbnail"] as? String, let url = URL(string: raw),
-                              url.scheme == "https" else { continue }
-                        URLSession.shared.dataTask(with: url) { [weak self, weak item] data, _, _ in
-                            guard let data = data else { return }
-                            DispatchQueue.main.async {
-                                item?.image = NSImage(data: data)
-                                self?.refresh()
-                            }
-                        }.resume()
-                    }
                 } else if let label = message["status"] as? String {
                     self.status.stringValue = localized(label)
                 }
@@ -1072,8 +1172,189 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
     }
 
+    private func addMusic(_ link: String) {
+        let item = Download(["url": link])
+        item.music = true
+        let preferred = queuedMusicFormat ?? defaultMusicFormat(for: item)
+        item.musicFormat = musicFormatChoices(for: item).contains(preferred) ? preferred : defaultMusicFormat(for: item)
+        downloads.append(item)
+        refresh()
+        if table.selectedRowIndexes.isEmpty, let row = rows.firstIndex(where: { $0 === item }) {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            table.scrollRowToVisible(row)
+        }
+        var metadata: [String: Any]?
+        item.inspectingMusic = true
+        item.process = musicPreview.run(link: link, folder: outputFolder(for: "audio_folder"),
+                                        source: nil, format: "FLAC", inspect: true, status: { [weak self] message in
+            self?.status.stringValue = localized(message)
+        },
+                                        event: { _, data in
+            metadata = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }, finish: { [weak self, weak item] code, message in
+            guard let self = self, let item = item else { return }
+            item.process = nil
+            item.inspectingMusic = false
+            if item.pendingRemoval {
+                self.delete(item, trashFile: false)
+            } else if code == 0, let info = metadata,
+                      let tracks = info["tracks"] as? [[String: Any]], !tracks.isEmpty {
+                self.expandMusic(item, tracks: tracks, collection: info["kind"] as? String != "track",
+                                 skipped: info["skipped"] as? Int ?? 0)
+            } else if item.status != "Paused" {
+                item.lastError = message.isEmpty ? localized("Could not read music tracks.") : message
+                item.scheduled = false
+                item.startedMode = nil
+                item.status = "Error"
+                self.status.stringValue = item.lastError
+            }
+            self.dispatch()
+        })
+        if item.process == nil {
+            item.inspectingMusic = false
+            item.status = "Error"
+            status.stringValue = "Could not launch the music engine."
+        }
+        refresh()
+    }
+
+    private func expandMusic(_ item: Download, tracks: [[String: Any]], collection: Bool, skipped: Int) {
+        guard let index = downloads.firstIndex(where: { $0 === item }) else { return }
+        let autoDownload = NativePreferences.read()["auto"] as? Bool == true
+        let added = tracks.enumerated().compactMap { offset, track -> Download? in
+            guard let name = track["name"] as? String, let artist = track["artists"] as? String,
+                  let encoded = try? JSONSerialization.data(withJSONObject: track) else { return nil }
+            let row = collection ? Download(["url": item.url, "index": offset + 1]) : item
+            row.title = "\(artist) — \(name)"
+            row.music = true
+            row.musicTrackJSON = String(decoding: encoded, as: UTF8.self)
+            row.musicCollection = collection ? item.id : nil
+            row.musicSource = item.musicSource
+            row.musicFormat = item.musicFormat
+            row.status = item.status
+            row.thumbnailURL = Self.thumbnailURL(track["cover_url"])
+            if item.status != "Paused" && (item.scheduled || autoDownload) {
+                schedule(row)
+            }
+            return row
+        }
+        downloads.replaceSubrange(index...index, with: added)
+        if skipped > 0 {
+            status.stringValue = String(format: localized("%d unavailable tracks skipped."), skipped)
+        }
+        refresh(replacing: item.id, with: added.first?.id)
+    }
+
+    private func pendingMusicGroup(for item: Download) -> [Download] {
+        guard let group = item.musicCollection else { return [item] }
+        return downloads.filter { $0.musicCollection == group && $0.startedMode == nil }
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !refreshingRows else { return }
+        updateMusicControlsForSelection()
+    }
+
+    private func updateMusicControlsForSelection() {
+        let row = table.selectedRow
+        if rows.indices.contains(row) {
+            let item = rows[row]
+            showMusicControls(for: item.music && !item.done ? item : nil)
+        } else {
+            showMusicControls(for: nil)
+        }
+    }
+
+    private func showMusicControls(for item: Download?) {
+        if musicSelection === item { return }
+        if musicSelection == nil {
+            previousMode = mode.selectedSegment
+            previousFormat = selectedFormat
+        }
+        musicSelection = item
+        musicSource.isHidden = item == nil
+        qualityWidth?.constant = item == nil ? 160 : 228
+        mode.isEnabled = item == nil
+        quality.isEnabled = item?.startedMode == nil
+        musicSource.isEnabled = item?.startedMode == nil
+        if let item = item {
+            mode.selectedSegment = 1
+            musicSource.selectItem(at: item.musicSource)
+        } else {
+            mode.selectedSegment = sharedAudioFormat == nil ? previousMode : 1
+        }
+        let shared = sharedAudioFormat
+        changeMode()
+        sharedAudioFormat = shared
+        if item == nil, let index = formatChoices.firstIndex(of: shared ?? previousFormat) {
+            quality.selectItem(at: index)
+            refresh()
+        }
+    }
+
+    @objc private func changeMusicSource() {
+        if let item = musicSelection, item.startedMode == nil {
+            item.musicSource = musicSource.indexOfSelectedItem
+            for row in pendingMusicGroup(for: item) {
+                row.musicSource = item.musicSource
+                if !formatChoices.contains(row.musicFormat) { row.musicFormat = defaultMusicFormat(for: row) }
+            }
+            changeMode()
+        }
+    }
+
+    private func effectiveSource(for item: Download) -> String {
+        let index = item.musicSource
+        if musicSources.indices.contains(index), index > 0 { return musicSources[index] }
+        guard let host = URL(string: item.url)?.host else { return "amazon" }
+        if host == "music.youtube.com" { return "ytmusic-spotiflac" }
+        if host == "beatport.com" || host == "www.beatport.com" { return "beatport" }
+        if host == "jiosaavn.com" || host == "www.jiosaavn.com" { return "jiosaavn" }
+        if host == "tidal.com" || host.hasSuffix(".tidal.com") { return "tidal-web" }
+        if host == "qobuz.com" || host.hasSuffix(".qobuz.com") { return "qobuz-web" }
+        if host == "deezer.com" || host.hasSuffix(".deezer.com") || host == "deezer.page.link" { return "deezer" }
+        return "amazon"
+    }
+
+    private func defaultMusicFormat(for item: Download) -> String {
+        ["ytmusic-spotiflac", "jiosaavn"].contains(effectiveSource(for: item)) ? "M4A" : "FLAC"
+    }
+
+    private func musicFormatChoices(for item: Download) -> [String] {
+        var choices = defaultMusicFormat(for: item) == "FLAC" ? ["FLAC"] : []
+        let source = effectiveSource(for: item)
+        if source == "tidal-web" || source == "qobuz-web" { choices.append("FLAC-CD") }
+        choices.append("M4A")
+        if source == "tidal-web" { choices.append("M4A-ATMOS") }
+        if source == "amazon" { choices += ["M4A-DDP", "MP4-ATMOS"] }
+        choices.append("MP3")
+        return choices
+    }
+
     private var formatChoices: [String] {
-        mode.selectedSegment == 1 ? ["MP3", "M4A"] : ["best", "2160p", "1080p", "720p", "480p"]
+        if let item = musicSelection { return musicFormatChoices(for: item) }
+        return mode.selectedSegment == 1 ? ["MP3", "M4A"] : ["best", "2160p", "1080p", "720p", "480p"]
+    }
+
+    private var regularFormat: String {
+        if let shared = sharedAudioFormat, downloads.contains(where: { $0.music && !$0.done }) {
+            return shared
+        }
+        return musicSelection == nil ? selectedFormat : previousFormat
+    }
+
+    private func formatLabel(_ format: String) -> String {
+        guard let item = musicSelection else { return format == "best" ? localized("Best available") : format }
+        switch format {
+        case "FLAC": return ["deezer", "beatport"].contains(effectiveSource(for: item)) ? "FLAC (Lossless)" : "FLAC (Hi-Res)"
+        case "FLAC-CD": return "FLAC (Lossless)"
+        case "M4A": return "M4A (AAC)"
+        case "M4A-DDP": return "M4A (Dolby Digital Plus)"
+        case "M4A-ATMOS": return "M4A (Dolby Atmos)"
+        case "MP4-ATMOS": return "MP4 (Dolby Atmos)"
+        case "MP3": return "MP3 (320 kbit/s)"
+        default: return format
+        }
     }
 
     private var selectedFormat: String {
@@ -1083,23 +1364,43 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func changeMode() {
+        if musicSelection == nil { sharedAudioFormat = nil }
         quality.removeAllItems()
-        quality.addItems(withTitles: formatChoices.map {
-            $0 == "best" ? localized("Best available") : $0
-        })
-        quality.selectItem(at: 0)
+        quality.addItems(withTitles: formatChoices.map { formatLabel($0) })
+        quality.selectItem(at: formatChoices.firstIndex(of: musicSelection?.musicFormat ?? "") ?? 0)
         refresh()
     }
 
-    @objc private func changeQuality() { refresh() }
+    @objc private func changeQuality() {
+        if let item = musicSelection, item.startedMode == nil {
+            queuedMusicFormat = selectedFormat
+            for row in pendingMusicGroup(for: item) { row.musicFormat = selectedFormat }
+            if selectedFormat == "MP3" || selectedFormat.hasPrefix("M4A") {
+                let shared = selectedFormat == "MP3" ? "MP3" : "M4A"
+                sharedAudioFormat = shared
+                for pending in downloads where pending.music && !pending.done && pending.startedMode == nil && pending !== item && (item.musicCollection == nil || pending.musicCollection != item.musicCollection) {
+                    pending.musicFormat = shared
+                }
+            } else {
+                sharedAudioFormat = nil
+            }
+        } else if musicSelection == nil {
+            sharedAudioFormat = nil
+        }
+        refresh()
+    }
 
     private func schedule(_ item: Download) {
         item.retry?.cancel()
         item.retry = nil
         item.retryCount = 0
-        item.startedMode = item.startedMode ?? selectedFormat
+        item.startedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
         item.status = "Waiting"
         item.scheduled = true
+        if musicSelection === item {
+            quality.isEnabled = false
+            musicSource.isEnabled = false
+        }
     }
 
     @objc private func selectQueue() {
@@ -1109,6 +1410,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc private func selectCompleted() {
         showCompleted = true
+        showMusicControls(for: nil)
         switchPage()
     }
 
@@ -1122,7 +1424,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     @objc private func startAll() {
-        for item in downloads where !item.done && !item.pendingRemoval && item.process == nil {
+        for item in downloads where !item.done && !item.pendingRemoval && (item.process == nil || item.music && item.startedMode == nil) {
             schedule(item)
         }
         dispatch()
@@ -1139,7 +1441,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.scheduled = false
         item.status = "Paused"
         item.progress = nil
-        if let process = item.process, process.isRunning { process.terminate() }
+        if !item.inspectingMusic, let process = item.process, process.isRunning { process.terminate() }
     }
 
     @objc private func openFolder() { NSWorkspace.shared.open(outputFolder(for: "video_folder")) }
@@ -1167,6 +1469,15 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     private func runEngineAction(_ action: String, reply: @escaping (String) -> Void) {
+        if action == "check-music" || action == "reinstall-music" {
+            let task = musicPreview.run(link: "", folder: folder, source: nil, format: "FLAC",
+                                        maintenance: action == "check-music" ? "check" : "reinstall",
+                                        status: { _ in }, event: { _, _ in }, finish: { _, message in
+                reply(message.isEmpty ? localized("Tool operation failed.") : message)
+            })
+            if task == nil { reply(localized("Tool operation failed.")) }
+            return
+        }
         if isUniversalDownload && action == "update-tools" {
             runBootstrap(mode: toolsReady ? "manual" : "install", reply: reply)
             return
@@ -1192,6 +1503,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             reply(result.isEmpty ? localized("Tool operation failed.") : result)
         })
         if task == nil { reply(localized("Tool operation failed.")) }
+    }
+
+    private func removeSelectedRows() {
+        let visible = rows
+        let selected = table.selectedRowIndexes.compactMap { visible.indices.contains($0) ? visible[$0] : nil }
+        for item in selected where !item.pendingRemoval { clear(item) }
+        refresh()
     }
 
     @objc private func clearList() {
@@ -1221,15 +1539,22 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let active = downloads.filter { $0.process != nil }.count
         let limit = NativePreferences.read()["parallel"] as? Int ?? 3
         let available = max(0, min(max(limit, 1), 10) - active)
-        for item in downloads.filter({ $0.scheduled && !$0.pendingRemoval && $0.process == nil }).prefix(available) {
+        var remaining = available
+        for item in downloads where item.scheduled && !item.pendingRemoval && item.process == nil {
+            guard remaining > 0 else { break }
             begin(item)
+            remaining -= 1
         }
         refresh()
     }
 
     private func begin(_ item: Download) {
-        let selectedMode = item.startedMode ?? selectedFormat
+        let selectedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
         item.startedMode = selectedMode
+        if item.music {
+            beginMusic(item, format: selectedMode)
+            return
+        }
         let audio = ["MP3", "M4A"].contains(selectedMode) && !item.url.contains("instagram.com/")
         let destination = outputFolder(for: audio ? "audio_folder" : "video_folder")
         let engineMode = selectedMode == "best" && !engineUsesModeKeys ? "Лучшее видео" : selectedMode
@@ -1263,7 +1588,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 }
             default: return
             }
-            self.refresh()
+            self.refreshStatus(for: item)
         }, finish: { [weak self, weak item] code in
             guard let self = self, let item = item else { return }
             item.process = nil
@@ -1292,6 +1617,69 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             notify("Download failed", body: item.title, setting: "notify_failed", enabledByDefault: true)
         } else {
             notify("Download started", body: item.title, setting: "notify_started")
+        }
+    }
+
+    private func beginMusic(_ item: Download, format: String) {
+        item.scheduled = false
+        item.status = "Connecting…"
+        item.progress = 0
+        item.lastError = ""
+        let source = effectiveSource(for: item)
+        appendLog("Music · " + item.title + " · " + source + " · " + format)
+        item.process = musicPreview.run(link: item.url, folder: outputFolder(for: "audio_folder"),
+                                        source: source, format: format, trackJSON: item.musicTrackJSON,
+                                        status: { [weak self, weak item] message in
+            guard let self = self, let item = item, item.status != "Paused" else { return }
+            self.status.stringValue = message
+            item.status = "Downloading"
+            self.refresh()
+        }, log: { [weak self] message in
+            self?.appendLog("Music · " + message)
+        }, event: { [weak self, weak item] kind, data in
+            if kind == "YTDL_PROGRESS", let item = item, item.status != "Paused",
+               let percent = try? JSONDecoder().decode(Double.self, from: data) {
+                item.status = "Downloading"
+                item.progress = percent
+                self?.refreshStatus(for: item)
+            }
+            if kind == "YTDL_FILE", let path = try? JSONDecoder().decode(String.self, from: data) {
+                item?.files = [URL(fileURLWithPath: path)]
+            }
+        }, finish: { [weak self, weak item] code, message in
+            guard let self = self, let item = item else { return }
+            item.process = nil
+            item.progress = nil
+            if item.pendingRemoval {
+                self.delete(item, trashFile: false)
+            } else if item.status != "Paused" || !item.files.isEmpty {
+                item.done = code == 0 && !item.files.isEmpty
+                item.status = item.done ? "Done" : "Error"
+                item.lastError = item.done ? "" : message
+                self.appendLog("Music · " + item.status + " · " + item.title)
+                if !item.done { self.unlockMusicOptions(item) }
+                self.status.stringValue = item.lastError
+                self.notify(item.done ? "Download completed" : "Download failed", body: item.title,
+                            setting: item.done ? "notify_completed" : "notify_failed", enabledByDefault: true)
+            }
+            self.dispatch()
+            if item.done { self.finishQueueIfNeeded(last: item) }
+        })
+        if item.process == nil {
+            item.progress = nil
+            item.status = "Error"
+            unlockMusicOptions(item)
+            status.stringValue = "Could not launch the music engine."
+        } else {
+            notify("Download started", body: item.title, setting: "notify_started")
+        }
+    }
+
+    private func unlockMusicOptions(_ item: Download) {
+        item.startedMode = nil
+        if musicSelection === item {
+            quality.isEnabled = true
+            musicSource.isEnabled = true
         }
     }
 
@@ -1352,14 +1740,35 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         refresh()
     }
 
-    private func refresh() {
+    private func refresh(replacing previousID: UUID? = nil, with replacementID: UUID? = nil) {
         let completed = downloads.filter { $0.done }.count
-        queueCount.stringValue = String(downloads.count - completed)
+        queueCount.stringValue = String(downloads.filter { !$0.done && !$0.pendingRemoval }.count)
         completedCount.stringValue = String(completed)
-        let count = rows.count
+        let visible = rows
+        let count = visible.count
         visibleCount.stringValue = itemCount(count)
         empty.isHidden = showCompleted || count > 0
-        table.reloadData()
+        let ids = visible.map(\.id)
+        displayedRows = visible
+        let selectedIDs = Set(table.selectedRowIndexes.compactMap { index -> UUID? in
+            guard displayedRowIDs.indices.contains(index) else { return nil }
+            let id = displayedRowIDs[index]
+            return id == previousID ? replacementID : id
+        })
+        let selection = IndexSet(ids.indices.filter { selectedIDs.contains(ids[$0]) })
+        refreshingRows = true
+        if ids == displayedRowIDs {
+            table.reloadData(forRowIndexes: IndexSet(integersIn: ids.indices),
+                             columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
+        } else {
+            displayedRowIDs = ids
+            table.reloadData()
+        }
+        if table.selectedRowIndexes != selection {
+            table.selectRowIndexes(selection, byExtendingSelection: false)
+        }
+        refreshingRows = false
+        updateMusicControlsForSelection()
     }
 
     private func centeredCell(_ content: NSView) -> NSView {
@@ -1435,8 +1844,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.retry?.cancel()
         item.retry = nil
         item.retryCount = 0
-        begin(item)
-        refresh()
+        if item.music {
+            schedule(item)
+            dispatch()
+        } else {
+            begin(item)
+            refresh()
+        }
     }
 
     @objc private func stopDownload(_ sender: NSMenuItem) {
@@ -1514,33 +1928,90 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         return item.process != nil ? "Pause" : "Start"
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+    private static func thumbnailURL(_ value: Any?) -> URL? {
+        guard let value = value as? String, let url = URL(string: value), url.scheme == "https" else { return nil }
+        return url
+    }
+
+    private func requestThumbnail(_ url: URL) {
+        guard !thumbnailFailures.contains(url), thumbnailRequests.insert(url).inserted else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            let bitmap = data.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) }.flatMap {
+                CGImageSourceCreateThumbnailAtIndex($0, 0, [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceShouldCacheImmediately: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 168
+                ] as CFDictionary)
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.thumbnailRequests.remove(url)
+                guard let bitmap = bitmap else {
+                    self.thumbnailFailures.insert(url)
+                    return
+                }
+                let image = NSImage(cgImage: bitmap, size: .zero)
+                self.thumbnails.setObject(image, forKey: url as NSURL)
+                let visible = self.table.rows(in: self.table.visibleRect)
+                let column = self.table.column(withIdentifier: NSUserInterfaceItemIdentifier("title"))
+                guard visible.location != NSNotFound, column >= 0 else { return }
+                for index in visible.location..<(visible.location + visible.length) {
+                    if let cell = self.table.view(atColumn: column, row: index, makeIfNecessary: false) as? QueueTitleCell,
+                       cell.thumbnailURL == url {
+                        cell.thumbnail.image = image
+                    }
+                }
+            }
+        }.resume()
+    }
+
+    private func refreshStatus(for item: Download) {
+        let schedule = dirtyStatusRows.isEmpty
+        dirtyStatusRows.insert(item.id)
+        guard schedule else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self else { return }
+            let dirty = self.dirtyStatusRows
+            self.dirtyStatusRows.removeAll(keepingCapacity: true)
+            let visible = self.table.rows(in: self.table.visibleRect)
+            guard visible.location != NSNotFound else { return }
+            let indexes = IndexSet((visible.location..<(visible.location + visible.length)).filter {
+                self.displayedRowIDs.indices.contains($0) && dirty.contains(self.displayedRowIDs[$0])
+            })
+            let column = self.table.column(withIdentifier: NSUserInterfaceItemIdentifier("status"))
+            if !indexes.isEmpty, column >= 0 {
+                self.table.reloadData(forRowIndexes: indexes, columnIndexes: IndexSet(integer: column))
+            }
+        }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { displayedRows.count }
 
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
-        guard rows.indices.contains(row), let key = column?.identifier.rawValue else { return nil }
-        let item = rows[row]
-        switch key {
+        guard displayedRows.indices.contains(row), let column = column else { return nil }
+        let item = displayedRows[row]
+        switch column.identifier.rawValue {
         case "title":
-            let image = NSImageView(image: item.image ?? NSImage(named: NSImage.multipleDocumentsName) ?? NSImage())
-            image.imageScaling = .scaleProportionallyUpOrDown
-            image.wantsLayer = true
-            image.layer?.cornerRadius = 6
-            image.layer?.masksToBounds = true
-            image.widthAnchor.constraint(equalToConstant: 84).isActive = true
-            image.heightAnchor.constraint(equalToConstant: 47.25).isActive = true
+            let cell = tableView.makeView(withIdentifier: column.identifier, owner: nil) as? QueueTitleCell
+                ?? QueueTitleCell(identifier: column.identifier)
             let prefix = item.index.map { String(format: "%02d · ", $0) } ?? ""
-            let label = NSTextField(labelWithString: prefix + item.title)
-            label.font = .systemFont(ofSize: 13, weight: .semibold)
-            label.lineBreakMode = .byTruncatingTail
-            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let cell = NSStackView(views: [image, label])
-            cell.spacing = 10
-            cell.alignment = .centerY
+            cell.caption.stringValue = prefix + item.title
+            cell.thumbnailURL = item.thumbnailURL
+            cell.thumbnail.image = NSImage(named: NSImage.multipleDocumentsName)
+            if let url = item.thumbnailURL {
+                if let image = thumbnails.object(forKey: url as NSURL) {
+                    cell.thumbnail.image = image
+                } else {
+                    requestThumbnail(url)
+                }
+            }
             return cell
         case "format":
-            let selectedMode = item.startedMode ?? selectedFormat
+            let selectedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
             let format = item.files.last?.pathExtension.uppercased() ??
-                (item.url.contains("instagram.com/") ? "Media" : (["MP3", "M4A"].contains(selectedMode) ? selectedMode : "MP4"))
+                (item.url.contains("instagram.com/") ? "Media" : (item.music ? String(selectedMode.prefix(while: { $0 != "-" })) :
+                    (["MP3", "M4A"].contains(selectedMode) ? selectedMode : "MP4")))
             let badge = NSTextField(labelWithString: localized(format))
             badge.font = .systemFont(ofSize: 11, weight: .medium)
             badge.alignment = .center

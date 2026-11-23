@@ -22,6 +22,9 @@ case "$variant" in
         : "${YTDL_TOOLS_PUBLIC_KEY:?Set YTDL_TOOLS_PUBLIC_KEY to build the Universal app}"
         minimum=10.15
         output="$PWD/dist/universal/YouTube Downloader.app"
+        if [[ -n "${YTDL_MUSIC_ENGINE_LIBRARY:-}" ]]; then
+            minimum=11.0
+        fi
         ;;
     *) echo "Usage: $0 [--universal|--engine-kit]" >&2; exit 2 ;;
 esac
@@ -36,7 +39,7 @@ compile_app() {
 }
 executable="$app/Contents/MacOS/YouTubeDownloader"
 if [[ "$variant" == --universal ]]; then
-    compile_app x86_64-apple-macos10.15 "$staging/intel"
+    compile_app "x86_64-apple-macos$minimum" "$staging/intel"
     compile_app arm64-apple-macos11.0 "$staging/arm"
     xcrun lipo -create "$staging/intel" "$staging/arm" -output "$executable"
     xcrun lipo "$executable" -verify_arch x86_64 arm64
@@ -110,9 +113,43 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$build_number</string>
   <key>LSMinimumSystemVersion</key><string>$minimum</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array><dict>
+    <key>CFBundleURLName</key><string>com.sponge1645.ytdl.youtube</string>
+    <key>CFBundleURLSchemes</key><array><string>ytdl</string></array>
+  </dict></array>
 </dict></plist>
 PLIST
-codesign --force --deep --sign - "$app"
+if [[ -n "${YTDL_MUSIC_ENGINE_LIBRARY:-}" && "$variant" == --universal ]]; then
+    xcrun lipo "$YTDL_MUSIC_ENGINE_LIBRARY" -verify_arch x86_64 arm64
+    cp music-track-smoke.py "$resources/"
+    notice_dir="$resources/Mornye"
+    mkdir -p "$notice_dir"
+    if [[ -n "${YTDL_MUSIC_ENGINE_SOURCE:-}" ]]; then
+        cp "$YTDL_MUSIC_ENGINE_SOURCE/"{LICENSE,COPYING,NOTICE} "$notice_dir/"
+    fi
+    cat > "$notice_dir/Source.txt" <<'NOTICE'
+YouTube Downloader uses the separately loaded Mornye desktop engine (LGPL).
+Source and build instructions:
+https://github.com/mornyeapp/Mornye/tree/c4a1c7b812eb135d6e1a295b6b25e11abbd72a7e
+NOTICE
+    plist="$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1 dict' "$plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1:CFBundleURLName string com.sponge1645.ytdl.music' "$plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1:CFBundleURLSchemes array' "$plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:1:CFBundleURLSchemes:0 string mornye' "$plist"
+    mkdir -p "$app/Contents/Frameworks"
+    cp "$YTDL_MUSIC_ENGINE_LIBRARY" "$app/Contents/Frameworks/libmornye_desktop.dylib"
+    codesign --force --sign - "$app/Contents/Frameworks/libmornye_desktop.dylib"
+fi
+if [[ "$variant" == --universal && "${YTDL_BUILD_SAFARI:-0}" == 1 ]]; then
+    bash safari/build/embed.sh "$app" "$staging/safari"
+fi
+if [[ "$variant" == --engine-kit ]]; then
+    codesign --force --deep --sign - "$app"
+else
+    codesign --force --sign - "$app"
+fi
 codesign --verify --deep --strict "$app"
 if [[ -e "$output" ]]; then
     mv "$output" "$staging/previous.app"
@@ -128,7 +165,7 @@ if ! mv "$app" "$output"; then
 fi
 # Refresh this bundle's Launch Services entry without resetting other apps.
 lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [[ -x "$lsregister" ]]; then
+if [[ -x "$lsregister" && -z "${CI:-}" ]]; then
     "$lsregister" -f "$output" || echo "Launch Services registration failed; open the app from Finder." >&2
 fi
 du -sh "$output"

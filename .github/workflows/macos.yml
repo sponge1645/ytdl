@@ -1,7 +1,5 @@
 name: Build macOS app
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       publish:
@@ -18,14 +16,21 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Check downloader protocol
-        run: python3 -m unittest discover -s tests
+        run: |
+          python3 -m unittest discover -s tests
+          python3 music-track-smoke.py --help
+          node --check safari/youtube.js
+          for script in build-macos.sh build-music.sh safari/build/embed.sh; do
+            bash -n "$script"
+          done
       - name: Build and verify Universal app
         env:
+          YTDL_BUILD_SAFARI: "1"
           YTDL_TOOLS_PUBLIC_KEY: ${{ vars.YTDL_TOOLS_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           version="$(cat VERSION)"
-          YTDL_BUILD_NUMBER="$((GITHUB_RUN_NUMBER + 5))" bash build-macos.sh
+          YTDL_BUILD_NUMBER="$((GITHUB_RUN_NUMBER + 5))" bash build-music.sh
           package="YouTube-Downloader-$version-Universal"
           ditto -c -k --keepParent "dist/universal/YouTube Downloader.app" "$package.zip"
           smoke="$(mktemp -d)"
@@ -35,6 +40,13 @@ jobs:
           codesign --verify --deep --strict "$app"
           xcrun lipo "$app/Contents/MacOS/YouTubeDownloader" -verify_arch x86_64 arm64
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$app/Contents/Info.plist")" = ytdl
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:1:CFBundleURLSchemes:0' "$app/Contents/Info.plist")" = mornye
+          test -s "$app/Contents/Resources/music-track-smoke.py"
+          xcrun lipo "$app/Contents/Frameworks/libmornye_desktop.dylib" -verify_arch x86_64 arm64
+          extension="$(find "$app/Contents/PlugIns" -name '*.appex' -print -quit)"
+          test -n "$extension"
+          python3 -c 'import json, sys; assert json.load(open(sys.argv[1]))["description"].strip()' "$extension/Contents/Resources/manifest.json"
           test -s "$app/Contents/Resources/AppIcon.icns"
           test -s "$app/Contents/Resources/tools-update-public.pem"
           test -s "$app/Contents/Resources/bootstrap-tools.sh"
