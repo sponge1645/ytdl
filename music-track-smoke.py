@@ -18,7 +18,7 @@ import shutil
 import re
 import subprocess
 import tempfile
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import urlopen
 from uuid import uuid4
 
@@ -214,6 +214,35 @@ def track_metadata(track, fallback_cover=""):
     return metadata
 
 
+def source_comment(url):
+    parts = urlsplit(url)
+    query = parse_qs(parts.query)
+    fields = {"music.apple.com": ("i",), "music.youtube.com": ("v", "list")}.get(parts.hostname, ())
+    return parts._replace(query=urlencode({key: query[key][0] for key in fields if key in query}),
+                          fragment="").geturl()
+
+
+def format_tag(value):
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "; ".join(item.strip() for item in value if isinstance(item, str) and item.strip())
+    return ""
+
+
+def provider_http_status(result):
+    if not isinstance(result, dict):
+        return None
+    for payload in (result, result.get("error"), result.get("details")):
+        if not isinstance(payload, dict):
+            continue
+        for key in ("http_status", "status_code", "status"):
+            status = payload.get(key)
+            if isinstance(status, (int, str)) and re.fullmatch(r"[45][0-9]{2}", str(status)):
+                return int(status)
+    return None
+
+
 def resolve_music_link(engine, url, provider, gui):
     try:
         return resolve_collection(engine, url)
@@ -244,6 +273,12 @@ def resolve_collection(engine, url):
     for entry in entries:
         metadata = track_metadata(entry, cover)
         if metadata:
+            if kind == "album":
+                for field in ("album_artist", "release_date", "genre", "composer", "copyright", "total_tracks", "total_discs"):
+                    if not metadata.get(field):
+                        metadata[field] = collection.get(field)
+                if not metadata.get("album_name"):
+                    metadata["album_name"] = collection.get("name") or collection.get("title")
             tracks.append(metadata)
     if not tracks:
         raise RuntimeError("No available music tracks were returned for this link.")
@@ -416,6 +451,7 @@ def write_metadata(source, destination, track, codec):
         "album_artist": track.get("album_artist"), "date": track.get("release_date"),
         "genre": track.get("genre"), "composer": track.get("composer"),
         "copyright": track.get("copyright"), "ISRC": track.get("isrc"),
+        "comment": track.get("source_comment"),
     }
     for tag, field, total_field in (("track", "track_number", "total_tracks"),
                                     ("disc", "disc_number", "total_discs")):
@@ -423,7 +459,7 @@ def write_metadata(source, destination, track, codec):
         if type(number) is int and number > 0:
             total = track.get(total_field)
             tags[tag] = f"{number}/{total}" if type(total) is int and total >= number else str(number)
-    metadata = [arg for key, value in tags.items() if isinstance(value, str) and value
+    metadata = [arg for key, raw in tags.items() if (value := format_tag(raw))
                 for arg in ("-metadata", f"{key}={value.replace(chr(0), '')}")]
     options = ["-f", "mp4"] if destination.suffix in {".mp4", ".m4a"} else []
     picture = ["-c:v", "mjpeg" if cover.is_file() else "copy", "-disposition:v:0", "attached_pic"]
@@ -482,6 +518,7 @@ def run(args, home):
             if kind != "track":
                 raise RuntimeError("Add the album or playlist to the app queue to download its tracks.")
             track = tracks[0]
+        track["source_comment"] = source_comment(args.url)
         failures = []
         for index, (service, audio_format) in enumerate(download_attempts(provider, args.source, args.format)):
             package = DOWNLOADERS[service][0]
@@ -548,7 +585,9 @@ def download_track(engine, track, provider, service, audio_format, output, desti
     if not isinstance(result, dict) or result.get("success") is not True:
         reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
         error_type = AudioUnavailable if isinstance(reason, str) and reason in UNAVAILABLE_ERRORS else RuntimeError
-        raise error_type(f"{label} did not return {audio_format} ({reason}).")
+        http_status = provider_http_status(result)
+        detail = f"{reason}, HTTP {http_status}" if http_status else reason
+        raise error_type(f"{label} did not return {audio_format} ({detail}).")
     reported = result.get("file_path")
     actual = result.get("actual_extension") or "unknown"
     if not isinstance(reported, str) or not reported:
