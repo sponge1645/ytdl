@@ -162,12 +162,39 @@ def metadata_provider(url):
     raise ValueError("This music catalog is not supported by the preview.")
 
 
-def resolve_track(engine, url):
+TRACK_FIELDS = ("name", "artists", "isrc", "duration_ms", "album_name", "cover_url",
+                "track_number", "disc_number", "total_tracks", "total_discs")
+
+
+def track_metadata(track, fallback_cover=""):
+    if not isinstance(track, dict) or not all(
+            isinstance(track.get(field), str) and track[field].strip() for field in ("name", "artists")):
+        return None
+    metadata = {field: track[field] for field in TRACK_FIELDS if field in track}
+    metadata["cover_url"] = metadata.get("cover_url") or track.get("cover_art") or fallback_cover
+    return metadata
+
+
+def resolve_collection(engine, url):
     result = engine.call("handleURLWithExtension", {"url": url})
-    track = result.get("track") if isinstance(result, dict) and result.get("type") == "track" else None
-    if not isinstance(track, dict) or not track.get("name") or not track.get("artists"):
-        raise RuntimeError("Could not read one track from this link. Use a track link, not an album or playlist.")
-    return track
+    kind = result.get("type") if isinstance(result, dict) else None
+    if kind == "track":
+        entries = [result.get("track")]
+        cover = ""
+    elif kind in {"album", "playlist"}:
+        collection = result.get(kind) or {}
+        entries = result.get("tracks") or collection.get("tracks") or result.get("track_list") or []
+        cover = result.get("cover_url") or collection.get("cover_url") or ""
+    else:
+        raise RuntimeError("Use a supported track, album or playlist link.")
+    tracks = []
+    for entry in entries:
+        metadata = track_metadata(entry, cover)
+        if metadata:
+            tracks.append(metadata)
+    if not tracks:
+        raise RuntimeError("No available music tracks were returned for this link.")
+    return kind, tracks, len(entries) - len(tracks)
 
 
 def media_tool(name):
@@ -256,14 +283,21 @@ def run(args, home, master_key):
         "allowed_directories": [str(output)],
     })
     engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
-    install_package(engine, home, provider)
-    track = resolve_track(engine, args.url)
-    cover = track.get("cover_url") or track.get("cover_art") or ""
-    if args.inspect:
-        print("YTDL_METADATA " + json.dumps({
-            "title": f"{track['artists']} — {track['name']}", "thumbnail": cover,
-        }))
-        return
+    if not args.track_json:
+        install_package(engine, home, provider)
+    if args.track_json:
+        track = track_metadata(json.loads(args.track_json))
+        if not track:
+            raise RuntimeError("The queued track has invalid metadata.")
+    else:
+        kind, tracks, skipped = resolve_collection(engine, args.url)
+        if args.inspect:
+            print("YTDL_METADATA " + json.dumps({"kind": kind, "tracks": tracks, "skipped": skipped}))
+            return
+        if kind != "track":
+            raise RuntimeError("Add the album or playlist to the app queue to download its tracks.")
+        track = tracks[0]
+    cover = track["cover_url"]
     engine.call("setDownloadDirectory", {"path": str(output)})
     service = args.source or ("amazon" if provider in {"amzn", "spotify-web", "apple-music"} else provider)
     package, quality, label = DOWNLOADERS[service]
@@ -277,7 +311,7 @@ def run(args, home, master_key):
         required_source, quality, extension, expected_codec = dolby
         if service != required_source:
             raise RuntimeError("The selected Dolby format is unavailable from this source.")
-    if package != provider:
+    if args.track_json or package != provider:
         install_package(engine, home, package)
     print(f"Searching {label} for {track['artists']} — {track['name']}", flush=True)
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
@@ -293,6 +327,10 @@ def run(args, home, master_key):
         "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
         "use_fallback": False, "embed_metadata": True,
     }
+    for field in ("track_number", "disc_number", "total_tracks", "total_discs"):
+        value = track.get(field)
+        if type(value) is int and value > 0:
+            request[field] = value
     result = engine.call("downloadByStrategy", json.dumps(request))
     if isinstance(result, dict) and result.get("error_type") == "verification_required":
         verify(engine, service, args.gui)
@@ -362,6 +400,7 @@ if __name__ == "__main__":
     parser.add_argument("--gui", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--inspect", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--format", choices=("FLAC", "FLAC-CD", "M4A", "MP3", *DOLBY_FORMATS), default="FLAC")
+    parser.add_argument("--track-json", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.output.exists() and not args.gui:
         parser.error("Choose a new output directory so the test cannot match an old file.")

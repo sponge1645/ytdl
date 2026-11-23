@@ -25,7 +25,7 @@ final class MusicPreview {
                 .contains { host == "music.amazon." + $0 }
     }
 
-    func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false,
+    func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false, trackJSON: String? = nil,
              status: @escaping (String) -> Void,
              event: @escaping (String, Data) -> Void,
              finish: @escaping (Int32, String) -> Void) -> Process? {
@@ -37,6 +37,7 @@ final class MusicPreview {
         var arguments = ["-u", script.path, Bundle.main.bundlePath, link, folder.path, "--gui", "--format", format]
         if let source = source { arguments += ["--source", source] }
         if inspect { arguments.append("--inspect") }
+        if let trackJSON = trackJSON { arguments += ["--track-json", trackJSON] }
         worker.arguments = arguments
         worker.standardOutput = pipe
         worker.standardError = pipe

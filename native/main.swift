@@ -9,6 +9,9 @@ private final class Download {
     let index: Int?
     var startedMode: String?
     var music = false
+    var musicTrackJSON: String?
+    var inspectingMusic = false
+    var musicCollection: UUID?
     var musicFormat = "FLAC"
     var musicSource = 0
     var status = "Waiting"
@@ -1110,42 +1113,81 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             table.scrollRowToVisible(row)
         }
         showMusicControls(for: item)
+        var metadata: [String: Any]?
+        item.inspectingMusic = true
         item.process = musicPreview.run(link: link, folder: outputFolder(for: "audio_folder"),
                                         source: nil, format: "FLAC", inspect: true, status: { _ in },
-                                        event: { [weak self, weak item] _, data in
-            guard let self = self, let item = item,
-                  let info = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] else { return }
-            item.title = info["title"] ?? item.url
-            self.refresh()
-            guard let raw = info["thumbnail"], let url = URL(string: raw), url.scheme == "https" else { return }
-            URLSession.shared.dataTask(with: url) { [weak self, weak item] data, _, _ in
-                guard let data = data else { return }
-                DispatchQueue.main.async {
-                    item?.image = NSImage(data: data)
-                    self?.refresh()
-                }
-            }.resume()
+                                        event: { _, data in
+            metadata = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         }, finish: { [weak self, weak item] code, message in
             guard let self = self, let item = item else { return }
             item.process = nil
+            item.inspectingMusic = false
             if item.pendingRemoval {
                 self.delete(item, trashFile: false)
+            } else if code == 0, let info = metadata,
+                      let tracks = info["tracks"] as? [[String: Any]], !tracks.isEmpty {
+                self.expandMusic(item, tracks: tracks, collection: info["kind"] as? String != "track",
+                                 skipped: info["skipped"] as? Int ?? 0)
             } else if item.status != "Paused" {
-                if code != 0 {
-                    item.lastError = message
-                    item.status = "Error"
-                    self.status.stringValue = message
-                } else if NativePreferences.read()["auto"] as? Bool == true {
-                    self.schedule(item)
-                }
+                item.lastError = message.isEmpty ? localized("Could not read music tracks.") : message
+                item.scheduled = false
+                item.startedMode = nil
+                item.status = "Error"
+                self.status.stringValue = item.lastError
             }
             self.dispatch()
         })
         if item.process == nil {
+            item.inspectingMusic = false
             item.status = "Error"
             status.stringValue = "Could not launch the music engine."
         }
         refresh()
+    }
+
+    private func expandMusic(_ item: Download, tracks: [[String: Any]], collection: Bool, skipped: Int) {
+        guard let index = downloads.firstIndex(where: { $0 === item }) else { return }
+        let selectFirst = musicSelection === item
+        let added = tracks.enumerated().compactMap { offset, track -> Download? in
+            guard let name = track["name"] as? String, let artist = track["artists"] as? String,
+                  let encoded = try? JSONSerialization.data(withJSONObject: track) else { return nil }
+            let row = collection ? Download(["url": item.url, "index": offset + 1]) : item
+            row.title = "\(artist) — \(name)"
+            row.music = true
+            row.musicTrackJSON = String(decoding: encoded, as: UTF8.self)
+            row.musicCollection = collection ? item.id : nil
+            row.musicSource = item.musicSource
+            row.musicFormat = item.musicFormat
+            row.status = item.status
+            if let raw = track["cover_url"] as? String, let url = URL(string: raw), url.scheme == "https" {
+                URLSession.shared.dataTask(with: url) { [weak self, weak row] data, _, _ in
+                    guard let data = data else { return }
+                    DispatchQueue.main.async {
+                        row?.image = NSImage(data: data)
+                        self?.refresh()
+                    }
+                }.resume()
+            }
+            if item.status != "Paused" && (item.scheduled || NativePreferences.read()["auto"] as? Bool == true) {
+                schedule(row)
+            }
+            return row
+        }
+        downloads.replaceSubrange(index...index, with: added)
+        if skipped > 0 {
+            status.stringValue = String(format: localized("%d unavailable tracks skipped."), skipped)
+        }
+        refresh()
+        if selectFirst, !showCompleted, let first = added.first, let row = rows.firstIndex(where: { $0 === first }) {
+            showMusicControls(for: first)
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+    }
+
+    private func pendingMusicGroup(for item: Download) -> [Download] {
+        guard let group = item.musicCollection else { return [item] }
+        return downloads.filter { $0.musicCollection == group && $0.startedMode == nil }
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -1186,7 +1228,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc private func changeMusicSource() {
         if let item = musicSelection, item.startedMode == nil {
             item.musicSource = musicSource.indexOfSelectedItem
-            if !formatChoices.contains(item.musicFormat) { item.musicFormat = "FLAC" }
+            for row in pendingMusicGroup(for: item) {
+                row.musicSource = item.musicSource
+                if !formatChoices.contains(row.musicFormat) { row.musicFormat = "FLAC" }
+            }
             changeMode()
         }
     }
@@ -1252,11 +1297,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc private func changeQuality() {
         if let item = musicSelection, item.startedMode == nil {
-            item.musicFormat = selectedFormat
+            for row in pendingMusicGroup(for: item) { row.musicFormat = selectedFormat }
             if selectedFormat == "MP3" || selectedFormat.hasPrefix("M4A") {
                 let shared = selectedFormat == "MP3" ? "MP3" : "M4A"
                 sharedAudioFormat = shared
-                for pending in downloads where pending.music && !pending.done && pending.startedMode == nil && pending !== item {
+                for pending in downloads where pending.music && !pending.done && pending.startedMode == nil && pending !== item && (item.musicCollection == nil || pending.musicCollection != item.musicCollection) {
                     pending.musicFormat = shared
                 }
             } else {
@@ -1319,7 +1364,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.scheduled = false
         item.status = "Paused"
         item.progress = nil
-        if let process = item.process, process.isRunning { process.terminate() }
+        if !item.inspectingMusic, let process = item.process, process.isRunning { process.terminate() }
     }
 
     @objc private func openFolder() { NSWorkspace.shared.open(outputFolder(for: "video_folder")) }
@@ -1489,7 +1534,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.lastError = ""
         let source = effectiveSource(for: item)
         item.process = musicPreview.run(link: item.url, folder: outputFolder(for: "audio_folder"),
-                                        source: source, format: format,
+                                        source: source, format: format, trackJSON: item.musicTrackJSON,
                                         status: { [weak self, weak item] message in
             guard let self = self, let item = item, item.status != "Paused" else { return }
             self.status.stringValue = message
