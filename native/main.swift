@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import ImageIO
 import UserNotifications
 
 private final class Download {
@@ -16,7 +17,7 @@ private final class Download {
     var musicSource = 0
     var status = "Waiting"
     var progress: Double?
-    var image: NSImage?
+    var thumbnailURL: URL?
     var retry: DispatchWorkItem?
     var retryCount = 0
     var lastError = ""
@@ -64,6 +65,32 @@ private final class DropZoneIcon: NSView {
     }
 }
 
+private final class QueueTitleCell: NSStackView {
+    let thumbnail = NSImageView()
+    let caption = NSTextField(labelWithString: "")
+    var thumbnailURL: URL?
+
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+        thumbnail.imageScaling = .scaleProportionallyUpOrDown
+        thumbnail.wantsLayer = true
+        thumbnail.layer?.cornerRadius = 6
+        thumbnail.layer?.masksToBounds = true
+        thumbnail.widthAnchor.constraint(equalToConstant: 84).isActive = true
+        thumbnail.heightAnchor.constraint(equalToConstant: 47.25).isActive = true
+        caption.font = .systemFont(ofSize: 13, weight: .semibold)
+        caption.lineBreakMode = .byTruncatingTail
+        caption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addArrangedSubview(thumbnail)
+        addArrangedSubview(caption)
+        spacing = 10
+        alignment = .centerY
+    }
+
+    required init?(coder: NSCoder) { fatalError("QueueTitleCell is created in code") }
+}
+
 private final class DownloadTable: NSTableView, NSMenuItemValidation {
     var rowMenu: ((Int) -> NSMenu?)?
     var selectedFiles: (() -> [URL])?
@@ -104,7 +131,12 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
     let table = DownloadTable()
+    private var displayedRows: [Download] = []
     private var displayedRowIDs: [UUID] = []
+    private let thumbnails = NSCache<NSURL, NSImage>()
+    private var thumbnailRequests: Set<URL> = []
+    private var thumbnailFailures: Set<URL> = []
+    private var dirtyStatusRows: Set<UUID> = []
     private var refreshingRows = false
     private var logWindow: NSWindow?
     private var logTextView: NSTextView?
@@ -395,6 +427,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         controls.alignment = .centerY
         controls.spacing = 10
 
+        thumbnails.countLimit = 256
         table.dataSource = self
         table.allowsMultipleSelection = true
         table.removeSelection = { [weak self] in self?.removeSelectedRows() }
@@ -1087,6 +1120,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 guard let self = self else { return }
                 if let items = message["items"] as? [[String: Any]] {
                     let added = items.map { Download($0) }
+                    for (info, item) in zip(items, added) {
+                        item.thumbnailURL = Self.thumbnailURL(info["thumbnail"])
+                    }
                     self.downloads.append(contentsOf: added)
                     if let first = added.first {
                         self.notify("Links added", body: added.count == 1 ? first.title : itemCount(added.count),
@@ -1098,17 +1134,6 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     }
                     if self.status.stringValue == localized("Reading link…") { self.status.stringValue = "" }
                     self.refresh()
-                    for (info, item) in zip(items, added) {
-                        guard let raw = info["thumbnail"] as? String, let url = URL(string: raw),
-                              url.scheme == "https" else { continue }
-                        URLSession.shared.dataTask(with: url) { [weak self, weak item] data, _, _ in
-                            guard let data = data else { return }
-                            DispatchQueue.main.async {
-                                item?.image = NSImage(data: data)
-                                self?.refresh()
-                            }
-                        }.resume()
-                    }
                 } else if let label = message["status"] as? String {
                     self.status.stringValue = localized(label)
                 }
@@ -1161,6 +1186,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func expandMusic(_ item: Download, tracks: [[String: Any]], collection: Bool, skipped: Int) {
         guard let index = downloads.firstIndex(where: { $0 === item }) else { return }
+        let autoDownload = NativePreferences.read()["auto"] as? Bool == true
         let added = tracks.enumerated().compactMap { offset, track -> Download? in
             guard let name = track["name"] as? String, let artist = track["artists"] as? String,
                   let encoded = try? JSONSerialization.data(withJSONObject: track) else { return nil }
@@ -1172,16 +1198,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             row.musicSource = item.musicSource
             row.musicFormat = item.musicFormat
             row.status = item.status
-            if let raw = track["cover_url"] as? String, let url = URL(string: raw), url.scheme == "https" {
-                URLSession.shared.dataTask(with: url) { [weak self, weak row] data, _, _ in
-                    guard let data = data else { return }
-                    DispatchQueue.main.async {
-                        row?.image = NSImage(data: data)
-                        self?.refresh()
-                    }
-                }.resume()
-            }
-            if item.status != "Paused" && (item.scheduled || NativePreferences.read()["auto"] as? Bool == true) {
+            row.thumbnailURL = Self.thumbnailURL(track["cover_url"])
+            if item.status != "Paused" && (item.scheduled || autoDownload) {
                 schedule(row)
             }
             return row
@@ -1524,7 +1542,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 }
             default: return
             }
-            self.refresh()
+            self.refreshStatus(for: item)
         }, finish: { [weak self, weak item] code in
             guard let self = self, let item = item else { return }
             item.process = nil
@@ -1577,7 +1595,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                let percent = try? JSONDecoder().decode(Double.self, from: data) {
                 item.status = "Downloading"
                 item.progress = percent
-                self?.refresh()
+                self?.refreshStatus(for: item)
             }
             if kind == "YTDL_FILE", let path = try? JSONDecoder().decode(String.self, from: data) {
                 item?.files = [URL(fileURLWithPath: path)]
@@ -1680,10 +1698,12 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let completed = downloads.filter { $0.done }.count
         queueCount.stringValue = String(downloads.filter { !$0.done && !$0.pendingRemoval }.count)
         completedCount.stringValue = String(completed)
-        let count = rows.count
+        let visible = rows
+        let count = visible.count
         visibleCount.stringValue = itemCount(count)
         empty.isHidden = showCompleted || count > 0
-        let ids = rows.map(\.id)
+        let ids = visible.map(\.id)
+        displayedRows = visible
         let selectedIDs = Set(table.selectedRowIndexes.compactMap { index -> UUID? in
             guard displayedRowIDs.indices.contains(index) else { return nil }
             let id = displayedRowIDs[index]
@@ -1862,28 +1882,84 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         return item.process != nil ? "Pause" : "Start"
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+    private static func thumbnailURL(_ value: Any?) -> URL? {
+        guard let value = value as? String, let url = URL(string: value), url.scheme == "https" else { return nil }
+        return url
+    }
+
+    private func requestThumbnail(_ url: URL) {
+        guard !thumbnailFailures.contains(url), thumbnailRequests.insert(url).inserted else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            let bitmap = data.flatMap { CGImageSourceCreateWithData($0 as CFData, nil) }.flatMap {
+                CGImageSourceCreateThumbnailAtIndex($0, 0, [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceShouldCacheImmediately: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 168
+                ] as CFDictionary)
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.thumbnailRequests.remove(url)
+                guard let bitmap = bitmap else {
+                    self.thumbnailFailures.insert(url)
+                    return
+                }
+                let image = NSImage(cgImage: bitmap, size: .zero)
+                self.thumbnails.setObject(image, forKey: url as NSURL)
+                let visible = self.table.rows(in: self.table.visibleRect)
+                let column = self.table.column(withIdentifier: NSUserInterfaceItemIdentifier("title"))
+                guard visible.location != NSNotFound, column >= 0 else { return }
+                for index in visible.location..<(visible.location + visible.length) {
+                    if let cell = self.table.view(atColumn: column, row: index, makeIfNecessary: false) as? QueueTitleCell,
+                       cell.thumbnailURL == url {
+                        cell.thumbnail.image = image
+                    }
+                }
+            }
+        }.resume()
+    }
+
+    private func refreshStatus(for item: Download) {
+        let schedule = dirtyStatusRows.isEmpty
+        dirtyStatusRows.insert(item.id)
+        guard schedule else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self else { return }
+            let dirty = self.dirtyStatusRows
+            self.dirtyStatusRows.removeAll(keepingCapacity: true)
+            let visible = self.table.rows(in: self.table.visibleRect)
+            guard visible.location != NSNotFound else { return }
+            let indexes = IndexSet((visible.location..<(visible.location + visible.length)).filter {
+                self.displayedRowIDs.indices.contains($0) && dirty.contains(self.displayedRowIDs[$0])
+            })
+            let column = self.table.column(withIdentifier: NSUserInterfaceItemIdentifier("status"))
+            if !indexes.isEmpty, column >= 0 {
+                self.table.reloadData(forRowIndexes: indexes, columnIndexes: IndexSet(integer: column))
+            }
+        }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { displayedRows.count }
 
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
-        guard rows.indices.contains(row), let key = column?.identifier.rawValue else { return nil }
-        let item = rows[row]
-        switch key {
+        guard displayedRows.indices.contains(row), let column = column else { return nil }
+        let item = displayedRows[row]
+        switch column.identifier.rawValue {
         case "title":
-            let image = NSImageView(image: item.image ?? NSImage(named: NSImage.multipleDocumentsName) ?? NSImage())
-            image.imageScaling = .scaleProportionallyUpOrDown
-            image.wantsLayer = true
-            image.layer?.cornerRadius = 6
-            image.layer?.masksToBounds = true
-            image.widthAnchor.constraint(equalToConstant: 84).isActive = true
-            image.heightAnchor.constraint(equalToConstant: 47.25).isActive = true
+            let cell = tableView.makeView(withIdentifier: column.identifier, owner: nil) as? QueueTitleCell
+                ?? QueueTitleCell(identifier: column.identifier)
             let prefix = item.index.map { String(format: "%02d · ", $0) } ?? ""
-            let label = NSTextField(labelWithString: prefix + item.title)
-            label.font = .systemFont(ofSize: 13, weight: .semibold)
-            label.lineBreakMode = .byTruncatingTail
-            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let cell = NSStackView(views: [image, label])
-            cell.spacing = 10
-            cell.alignment = .centerY
+            cell.caption.stringValue = prefix + item.title
+            cell.thumbnailURL = item.thumbnailURL
+            cell.thumbnail.image = NSImage(named: NSImage.multipleDocumentsName)
+            if let url = item.thumbnailURL {
+                if let image = thumbnails.object(forKey: url as NSURL) {
+                    cell.thumbnail.image = image
+                } else {
+                    requestThumbnail(url)
+                }
+            }
             return cell
         case "format":
             let selectedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
