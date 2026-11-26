@@ -59,7 +59,7 @@ class MusicSourceTests(unittest.TestCase):
             with self.subTest(error=error):
                 self.check_download(None, error, ["amazon", "tidal-web", "qobuz-web"], True)
 
-    def test_tidal_batch_uses_one_verification_and_routes_replies_by_track(self):
+    def test_music_batch_uses_one_verification_and_routes_replies_by_track(self):
         download = RUN.__globals__["download_batch"]
         engine = Mock()
         engine.submit.side_effect = [1, 2, 3, 4]
@@ -82,14 +82,14 @@ class MusicSourceTests(unittest.TestCase):
             "finish_audio": finish,
         }), redirect_stdout(StringIO()) as out:
             root = Path(folder)
-            download(SimpleNamespace(app=root, output=root / "out", batch=json.dumps(entries)), root)
-        verify.assert_called_once_with(engine, "tidal-web", True)
-        install.assert_called_once_with(engine, root, "tidal-web")
+            download(SimpleNamespace(app=root, output=root / "out", source="ytmusic-spotiflac", batch=json.dumps(entries)), root)
+        verify.assert_called_once_with(engine, "ytmusic-spotiflac", True)
+        install.assert_called_once_with(engine, root, "ytmusic-spotiflac")
         self.assertEqual([call.args[0]["track"] for call in finish.call_args_list], [0, 1])
         self.assertEqual([call.args[3] for call in finish.call_args_list], ["MP3", "M4A"])
         submissions = [call.args[1] for call in engine.submit.call_args_list]
         self.assertEqual(submissions[:2], submissions[2:])
-        self.assertTrue(all(json.loads(value)["output_ext"] == ".flac" for value in submissions))
+        self.assertTrue(all(json.loads(value)["output_ext"] == ".m4a" for value in submissions))
         self.assertNotEqual(json.loads(submissions[0])["output_path"],
                             json.loads(submissions[1])["output_path"])
         self.assertIn('YTDL_BATCH_RESULT [1, {"file": "/out/1.flac"}]', out.getvalue())

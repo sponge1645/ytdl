@@ -1825,11 +1825,12 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         for item in downloads where item.scheduled && !item.pendingRemoval && item.process == nil {
             guard remaining > 0 else { break }
             if item.music && musicActive { continue }
-            if remaining >= 2, canPairTidal(item),
+            if remaining >= 2, item.musicTrackJSON != nil, let source = explicitMusicSource(for: item),
                let peer = downloads.first(where: {
                    $0 !== item && $0.scheduled && !$0.pendingRemoval && $0.process == nil
-                       && canPairTidal($0) && downloadFolder(for: $0, audio: true) == downloadFolder(for: item, audio: true)
-               }), beginTidalPair(item, peer) {
+                       && $0.musicTrackJSON != nil && explicitMusicSource(for: $0) == source
+                       && downloadFolder(for: $0, audio: true) == downloadFolder(for: item, audio: true)
+               }), beginMusicPair(item, peer, source: source) {
                 musicActive = true
                 remaining -= 2
                 continue
@@ -1991,19 +1992,14 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
     }
 
-    private func canPairTidal(_ item: Download) -> Bool {
-        item.music && explicitMusicSource(for: item) == "tidal-web" && item.musicTrackJSON != nil
-            && ["FLAC", "FLAC-CD", "MP3", "M4A"].contains(item.startedMode ?? item.musicFormat)
-    }
-
-    private func beginTidalPair(_ first: Download, _ second: Download) -> Bool {
+    private func beginMusicPair(_ first: Download, _ second: Download, source: String) -> Bool {
         let items = [first, second]
         let entries = items.map { ["url": $0.url, "track": $0.musicTrackJSON ?? "",
                                    "format": $0.startedMode ?? $0.musicFormat] }
         guard let payload = try? JSONSerialization.data(withJSONObject: entries) else { return false }
         var results: [Int: [String: String]] = [:]
         let process = musicPreview.run(link: first.url, folder: downloadFolder(for: first, audio: true),
-                                       source: "tidal-web", format: first.startedMode ?? first.musicFormat,
+                                       source: source, format: first.startedMode ?? first.musicFormat,
                                        batch: String(decoding: payload, as: UTF8.self),
                                        status: { [weak self] message in self?.setFooterStatus(message) },
                                        log: { [weak self] message in self?.appendLog("Music · " + message) },

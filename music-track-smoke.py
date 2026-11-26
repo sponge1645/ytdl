@@ -655,13 +655,31 @@ def audio_request(track, provider, service, quality, output, extension):
     return stem, request
 
 
+def audio_settings(service, audio_format):
+    _, quality, _ = DOWNLOADERS[service]
+    dolby = DOLBY_FORMATS.get(audio_format)
+    compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and audio_format == "M4A")
+    if compressed and audio_format not in {"M4A", "MP3"}:
+        raise RuntimeError("Choose M4A or MP3 for this source.")
+    if compressed and service == "beatport":
+        quality = "HIGH"
+    extension = ".m4a" if compressed else ".flac"
+    if audio_format == "FLAC-CD":
+        quality = "LOSSLESS"
+    if dolby:
+        _, quality, extension, _ = dolby
+    return quality, extension, compressed, dolby
+
+
 def download_batch(args, home):
     method = "downloadByStrategy"
-    service = "tidal-web"
-    package, default_quality, _ = DOWNLOADERS[service]
+    service = args.source
+    if service not in DOWNLOADERS:
+        raise ValueError("Choose a music source for parallel downloads.")
+    package, _, label = DOWNLOADERS[service]
     batch = json.loads(args.batch)
     if not isinstance(batch, list) or len(batch) != 2:
-        raise ValueError("Expected two Tidal tracks.")
+        raise ValueError("Expected two music tracks.")
     library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
     destination = args.output.resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -678,11 +696,13 @@ def download_batch(args, home):
                     raise ValueError("Invalid queued track metadata.")
                 track["source_comment"] = source_comment(entry["url"])
                 fmt = entry["format"]
-                quality = "LOSSLESS" if fmt == "FLAC-CD" else default_quality
+                provider = metadata_provider(entry["url"])
+                download_source(provider, service, fmt)
+                quality, extension, compressed, dolby = audio_settings(service, fmt)
                 folder = output / str(number)
                 folder.mkdir()
-                stem, request = audio_request(track, metadata_provider(entry["url"]), service, quality, folder, ".flac")
-                jobs.append((track, fmt, folder, stem, request))
+                stem, request = audio_request(track, provider, service, quality, folder, extension)
+                jobs.append((track, fmt, folder, stem, request, extension, compressed, dolby))
             engine.batch_items = {job[4]["item_id"]: number for number, job in enumerate(jobs)}
             engine.lib.mornye_subscribe(10)
 
@@ -704,7 +724,7 @@ def download_batch(args, home):
                         replies[number] = {"error_type": str(error)}
                 return replies
 
-            print("Searching Tidal for two tracks", flush=True)
+            print(f"Searching {label} for two tracks", flush=True)
             replies = download(range(len(jobs)))
             waiting = sorted(number for number, result in replies.items()
                              if isinstance(result, dict) and result.get("error_type") == "verification_required")
@@ -722,10 +742,10 @@ def download_batch(args, home):
                     print("YTDL_VERIFICATION_RESULT " + json.dumps(verified), flush=True)
 
             engine.batch_items = {}
-            for number, (track, fmt, folder, stem, _) in enumerate(jobs):
+            for number, (track, fmt, folder, stem, _, extension, compressed, dolby) in enumerate(jobs):
                 try:
-                    path = finish_audio(replies[number], track, "Tidal", fmt, folder, destination,
-                                        True, stem, ".flac", False, False)
+                    path = finish_audio(replies[number], track, label, fmt, folder, destination,
+                                        True, stem, extension, compressed, dolby)
                     status = {"file": str(path)}
                 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                     status = {"error": str(error)}
@@ -733,19 +753,9 @@ def download_batch(args, home):
 
 
 def download_track(engine, track, provider, service, audio_format, output, destination_folder, gui):
-    _, quality, label = DOWNLOADERS[service]
+    _, _, label = DOWNLOADERS[service]
     engine.call("setDownloadDirectory", {"path": str(output)})
-    dolby = DOLBY_FORMATS.get(audio_format)
-    compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and audio_format == "M4A")
-    if compressed and audio_format not in {"M4A", "MP3"}:
-        raise RuntimeError("Choose M4A or MP3 for this source.")
-    if compressed and service == "beatport":
-        quality = "HIGH"
-    extension = ".m4a" if compressed else ".flac"
-    if audio_format == "FLAC-CD":
-        quality = "LOSSLESS"
-    if dolby:
-        _, quality, extension, _ = dolby
+    quality, extension, compressed, dolby = audio_settings(service, audio_format)
     print(f"Searching {label} ({audio_format}) for {track['artists']} — {track['name']}", flush=True)
     print(f"Audio request: source={service} · quality={quality} · extension={extension}", flush=True)
     stem, request = audio_request(track, provider, service, quality, output, extension)
