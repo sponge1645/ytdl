@@ -48,6 +48,39 @@ class MusicSourceTests(unittest.TestCase):
             with self.subTest(error=error):
                 self.check_download(None, error, ["amazon", "tidal-web", "qobuz-web"], True)
 
+    def test_tidal_batch_uses_one_verification_and_routes_replies_by_track(self):
+        download = RUN.__globals__["download_batch"]
+        engine = Mock()
+        engine.submit.side_effect = [1, 2, 3, 4]
+        engine.wait_for_reply.side_effect = [(2, 0, b""), (1, 0, b""),
+                                             (4, 0, b""), (3, 0, b"")]
+        challenge = {"error_type": "verification_required"}
+        engine.decode_reply.side_effect = [challenge, challenge, {"track": 1}, {"track": 0}]
+        verify = Mock()
+        finish = Mock(side_effect=lambda reply, *args: f"/out/{reply['track']}.flac")
+        install = Mock()
+        entries = [
+            {"url": "https://open.spotify.com/album/example", "format": "FLAC",
+             "track": json.dumps({"name": f"Song {i}", "artists": "Artist", "playlist_index": i + 1})}
+            for i in range(2)
+        ]
+        with tempfile.TemporaryDirectory() as folder, patch.dict(RUN.__globals__, {
+            "open_music_engine": lambda *args: nullcontext(engine),
+            "install_package": install,
+            "complete_browser_verification": verify,
+            "finish_audio": finish,
+        }), redirect_stdout(StringIO()) as out:
+            root = Path(folder)
+            download(SimpleNamespace(app=root, output=root / "out", batch=json.dumps(entries)), root)
+        verify.assert_called_once_with(engine, "tidal-web", True)
+        install.assert_called_once_with(engine, root, "tidal-web")
+        self.assertEqual([call.args[0]["track"] for call in finish.call_args_list], [0, 1])
+        submissions = [call.args[1] for call in engine.submit.call_args_list]
+        self.assertEqual(submissions[:2], submissions[2:])
+        self.assertNotEqual(json.loads(submissions[0])["output_path"],
+                            json.loads(submissions[1])["output_path"])
+        self.assertIn('YTDL_BATCH_RESULT [1, {"file": "/out/1.flac"}]', out.getvalue())
+
     def test_media_tools_use_active_architecture_kit(self):
         media_tool = RUN.__globals__["media_tool"]
         with tempfile.TemporaryDirectory() as folder:
