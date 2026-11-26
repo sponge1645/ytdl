@@ -698,6 +698,7 @@ def download_batch(args, home):
                 failures[number] = []
             engine.lib.mornye_subscribe(10)
             installed = set()
+            install_errors = {}
 
             def download(requests):
                 pending = {engine.submit(method, json.dumps(request)): number for number, request in requests.items()}
@@ -729,9 +730,16 @@ def download_batch(args, home):
                         continue
                     service, fmt = candidate
                     package, _, label = DOWNLOADERS[service]
-                    if package not in installed:
-                        install_package(engine, home, package)
-                        installed.add(package)
+                    if package not in installed and package not in install_errors:
+                        try:
+                            install_package(engine, home, package)
+                            installed.add(package)
+                        except (OSError, RuntimeError) as error:
+                            install_errors[package] = f"{label}: could not load the download extension. {error}"
+                            print(install_errors[package], flush=True)
+                    if package in install_errors:
+                        failures[number].append(install_errors[package])
+                        continue
                     track, provider = tracks[number]
                     quality, extension, compressed, dolby = audio_settings(service, fmt)
                     folder = Path(tempfile.mkdtemp(prefix=f"{number}-", dir=output))
