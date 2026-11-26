@@ -1787,10 +1787,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     private func removeSelectedRows() {
-        let visible = rows
-        let selected = table.selectedRowIndexes.compactMap { visible.indices.contains($0) ? visible[$0] : nil }
+        let indexes = table.selectedRowIndexes
+        guard let first = indexes.first else { return }
+        let selected = indexes.compactMap { displayedRows.indices.contains($0) ? displayedRows[$0] : nil }
         for item in selected where !item.pendingRemoval { clear(item) }
-        refresh()
+        refresh(selectNear: first)
     }
 
     @objc private func clearList() {
@@ -2140,7 +2141,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         refresh()
     }
 
-    private func refresh(replacing previousID: UUID? = nil, with replacementID: UUID? = nil) {
+    private func refresh(replacing previousID: UUID? = nil, with replacementID: UUID? = nil,
+                         selectNear deletedIndex: Int? = nil) {
         let completed = downloads.filter { $0.done }.count
         queueCount.stringValue = String(downloads.filter { !$0.done && !$0.pendingRemoval }.count)
         completedCount.stringValue = String(completed)
@@ -2155,7 +2157,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             let id = displayedRowIDs[index]
             return id == previousID ? replacementID : id
         })
-        let selection = IndexSet(ids.indices.filter { selectedIDs.contains(ids[$0]) })
+        var selection = IndexSet(ids.indices.filter { selectedIDs.contains(ids[$0]) })
+        if selection.isEmpty, let deletedIndex = deletedIndex, !ids.isEmpty {
+            selection.insert(min(deletedIndex, ids.count - 1))
+        }
         refreshingRows = true
         if ids == displayedRowIDs {
             table.reloadData(forRowIndexes: IndexSet(integersIn: ids.indices),
@@ -2167,6 +2172,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if table.selectedRowIndexes != selection {
             table.selectRowIndexes(selection, byExtendingSelection: false)
         }
+        if deletedIndex != nil, let row = selection.first { table.scrollRowToVisible(row) }
         refreshingRows = false
         updateMusicControlsForSelection()
     }
