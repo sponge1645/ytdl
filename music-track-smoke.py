@@ -120,7 +120,19 @@ class Engine:
         return result
 
 
-def verify(engine, service, gui):
+def verify(engine, service, gui, retry):
+    success = False
+    try:
+        complete_browser_verification(engine, service, gui)
+        result = retry()
+        success = not (isinstance(result, dict) and result.get("error_type") == "verification_required")
+        return result
+    finally:
+        if gui:
+            print("YTDL_VERIFICATION_RESULT " + json.dumps(success), flush=True)
+
+
+def complete_browser_verification(engine, service, gui):
     pending = engine.call("getExtensionPendingAuth", {"extension_id": service})
     url = pending.get("auth_url", "") if isinstance(pending, dict) else ""
     challenge = urlsplit(url)
@@ -202,7 +214,7 @@ def metadata_provider(url):
 
 TRACK_FIELDS = ("id", "spotify_id", "name", "artists", "isrc", "duration_ms", "album_name", "cover_url",
                 "track_number", "disc_number", "total_tracks", "total_discs",
-                "album_artist", "release_date", "genre", "composer", "copyright")
+                "album_artist", "release_date", "genre", "composer", "copyright", "playlist_index")
 
 
 def track_metadata(track, fallback_cover=""):
@@ -249,8 +261,8 @@ def resolve_music_link(engine, url, provider, gui):
     except RuntimeError as error:
         if "verification required" not in str(error).casefold():
             raise
-    verify(engine, "amazon" if provider == "amzn" else provider, gui)
-    return resolve_collection(engine, url)
+    return verify(engine, "amazon" if provider == "amzn" else provider, gui,
+                  lambda: resolve_collection(engine, url))
 
 
 def resolve_collection(engine, url):
@@ -282,7 +294,9 @@ def resolve_collection(engine, url):
             tracks.append(metadata)
     if not tracks:
         raise RuntimeError("No available music tracks were returned for this link.")
-    return kind, tracks, len(entries) - len(tracks)
+    title = (collection.get("name") or collection.get("title") or collection.get("playlist_name")
+             or result.get("title") or result.get("name")) if kind == "playlist" else None
+    return kind, tracks, len(entries) - len(tracks), title
 
 
 def media_tool(name):
@@ -550,9 +564,9 @@ def run(args, home):
             if not track:
                 raise RuntimeError("The queued track has invalid metadata.")
         else:
-            kind, tracks, skipped = resolve_music_link(engine, args.url, provider, args.gui)
+            kind, tracks, skipped, title = resolve_music_link(engine, args.url, provider, args.gui)
             if args.inspect:
-                print("YTDL_METADATA " + json.dumps({"kind": kind, "tracks": tracks, "skipped": skipped}))
+                print("YTDL_METADATA " + json.dumps({"kind": kind, "tracks": tracks, "skipped": skipped, "playlist_title": title}))
                 return
             if kind != "track":
                 raise RuntimeError("Add the album or playlist to the app queue to download its tracks.")
@@ -620,8 +634,7 @@ def download_track(engine, track, provider, service, audio_format, output, desti
         engine.lib.mornye_subscribe(10)
     result = engine.call("downloadByStrategy", json.dumps(request))
     if isinstance(result, dict) and result.get("error_type") == "verification_required":
-        verify(engine, service, gui)
-        result = engine.call("downloadByStrategy", json.dumps(request))
+        result = verify(engine, service, gui, lambda: engine.call("downloadByStrategy", json.dumps(request)))
     if not isinstance(result, dict) or result.get("success") is not True:
         reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
         error_type = AudioUnavailable if isinstance(reason, str) and reason in UNAVAILABLE_ERRORS else RuntimeError
@@ -676,6 +689,9 @@ def download_track(engine, track, provider, service, audio_format, output, desti
         print(f"Writing metadata: {track['artists']} — {track['name']}", flush=True)
         path = write_metadata(path, output / ("tagged" + extension), track, codec)
         suffix = path.suffix.lower()
+        playlist_index = track.get("playlist_index")
+        if type(playlist_index) is int and playlist_index > 0:
+            stem = f"{playlist_index:02d} - {stem}"
         for number in itertools.count(1):
             name = stem if number == 1 else f"{stem} ({number})"
             destination = destination_folder / f"{name}{suffix}"
@@ -724,6 +740,7 @@ if __name__ == "__main__":
     parser.add_argument("--inspect", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--format", choices=("FLAC", "FLAC-CD", "M4A", "MP3", *DOLBY_FORMATS), default="FLAC")
     parser.add_argument("--track-json", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-slot", type=int, choices=range(10), default=0, help=argparse.SUPPRESS)
     parser.add_argument("--maintenance", choices=("check", "reinstall"), help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.output.exists() and not args.gui:
@@ -731,6 +748,8 @@ if __name__ == "__main__":
     try:
         os.umask(0o077)
         home = Path.home() / "Library/Application Support/YTDL/Music Preview"
+        if args.gui and not args.inspect and not args.maintenance and args.worker_slot:
+            home = home / "workers" / str(args.worker_slot)
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
         if args.maintenance:
             maintain_metadata_extensions(args, home)

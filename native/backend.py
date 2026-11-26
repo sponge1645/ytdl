@@ -119,7 +119,8 @@ def inspect(url):
         if link.startswith(("http://", "https://")):
             thumbnails = entry.get("thumbnails") or []
             items.append({"url": link, "title": title or link, "index": len(items) + 1,
-                          "thumbnail": entry.get("thumbnail") or (thumbnails[-1].get("url") if thumbnails else None)})
+                          "thumbnail": entry.get("thumbnail") or (thumbnails[-1].get("url") if thumbnails else None),
+                          **({"playlist_title": data["title"]} if data.get("title") else {})})
     if not items:
         raise RuntimeError("No available playlist entries.")
     emit("items", items=items)

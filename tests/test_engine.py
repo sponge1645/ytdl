@@ -66,7 +66,7 @@ class EngineTests(unittest.TestCase):
                              "Invalid proxy URL. Check the host and port and percent-encode credentials.")
 
     def test_inspect_excludes_hidden_entries_before_numbering(self):
-        playlist = {"entries": [
+        playlist = {"title": "My Playlist", "entries": [
             None,
             {"title": "[Deleted video]", "url": "https://example.com/deleted"},
             {"title": "Hidden", "availability": "private", "url": "https://example.com/private"},
@@ -79,7 +79,8 @@ class EngineTests(unittest.TestCase):
             run.return_value.stdout = json.dumps(playlist)
             backend.inspect("https://example.com/playlist")
         self.assertEqual(json.loads(out.getvalue())["items"], [
-            {"url": "https://example.com/video", "title": "Visible", "index": 1, "thumbnail": None},
+            {"url": "https://example.com/video", "title": "Visible", "index": 1, "thumbnail": None,
+             "playlist_title": "My Playlist"},
         ])
 
     def test_cleanup_preserves_active_current_and_previous_kit(self):

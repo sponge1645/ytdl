@@ -13,6 +13,25 @@ RUN = runpy.run_path(str(Path(__file__).resolve().parents[1] / "music-track-smok
 
 
 class MusicSourceTests(unittest.TestCase):
+    def test_music_playlist_retains_its_title(self):
+        resolve = RUN.__globals__["resolve_collection"]
+        engine = Mock()
+        engine.call.return_value = {"type": "playlist", "playlist": {
+            "title": "My Mix", "tracks": [{"name": "Song", "artists": "Artist"}, None],
+        }}
+        kind, tracks, skipped, title = resolve(engine, "https://open.spotify.com/playlist/example")
+        self.assertEqual((kind, skipped, title), ("playlist", 1, "My Mix"))
+        self.assertEqual([track["name"] for track in tracks], ["Song"])
+
+    def test_verification_reports_repeated_challenge_as_failure(self):
+        verify = RUN.__globals__["verify"]
+        for result, expected in [({"success": True}, "true"), ({"error_type": "verification_required"}, "false")]:
+            with self.subTest(result=result), patch.dict(RUN.__globals__, {
+                "complete_browser_verification": Mock()
+            }), redirect_stdout(StringIO()) as out:
+                self.assertEqual(verify(Mock(), "amazon", True, lambda: result), result)
+                self.assertEqual(out.getvalue().strip(), f"YTDL_VERIFICATION_RESULT {expected}")
+
     def test_youtube_link_can_switch_to_flac(self):
         attempts = RUN.__globals__["download_attempts"]
         self.assertEqual(next(attempts("ytmusic-spotiflac", None, "FLAC")), ("tidal-web", "FLAC"))

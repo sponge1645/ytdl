@@ -30,7 +30,7 @@ final class MusicPreview {
                 .contains { host == "music.amazon." + $0 }
     }
 
-    func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false, trackJSON: String? = nil, maintenance: String? = nil,
+    func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false, trackJSON: String? = nil, maintenance: String? = nil, workerSlot: Int = 0,
              status: @escaping (String) -> Void,
              log: @escaping (String) -> Void = { _ in },
              event: @escaping (String, Data) -> Void,
@@ -45,6 +45,7 @@ final class MusicPreview {
         if inspect { arguments.append("--inspect") }
         if let maintenance = maintenance { arguments += ["--maintenance", maintenance] }
         if let trackJSON = trackJSON { arguments += ["--track-json", trackJSON] }
+        if workerSlot > 0 { arguments += ["--worker-slot", String(workerSlot)] }
         worker.arguments = arguments
         worker.standardOutput = pipe
         worker.standardError = pipe
@@ -72,7 +73,7 @@ final class MusicPreview {
                             self?.beginVerification(payload, input: input.fileHandleForWriting, status: status)
                         }
                     } else if let split = line.firstIndex(of: " "),
-                              line.hasPrefix("YTDL_METADATA ") || line.hasPrefix("YTDL_FILE ") || line.hasPrefix("YTDL_PROGRESS ") {
+                              line.hasPrefix("YTDL_METADATA ") || line.hasPrefix("YTDL_FILE ") || line.hasPrefix("YTDL_PROGRESS ") || line.hasPrefix("YTDL_VERIFICATION_RESULT ") {
                         let kind = String(line[..<split])
                         let payload = Data(line[line.index(after: split)...].utf8)
                         DispatchQueue.main.async { event(kind, payload) }

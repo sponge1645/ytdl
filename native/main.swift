@@ -13,7 +13,9 @@ private final class Download {
     var music = false
     var musicTrackJSON: String?
     var inspectingMusic = false
+    var musicWorkerSlot: Int?
     var musicCollection: UUID?
+    var playlistTitle: String?
     var musicFormat = "FLAC"
     var musicSource = 0
     var status = "Waiting"
@@ -665,7 +667,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             .appendingPathComponent(engineArchitecture)
     }
 
-    private func setFooterStatus(_ message: String, error: Bool = false) {
+    private func setFooterStatus(_ message: String, error: Bool = false, duration: TimeInterval? = nil) {
         statusClearTimer?.invalidate()
         statusClearTimer = nil
         if status.stringValue != message {
@@ -673,8 +675,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             status.stringValue = message
             status.toolTip = message.isEmpty ? nil : message
         }
-        if error && !message.isEmpty {
-            let timer = Timer(timeInterval: 15, repeats: false) { [weak self] _ in
+        if let interval = duration ?? (error ? 15 : nil), !message.isEmpty {
+            let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
                 self?.setFooterStatus("")
             }
             statusClearTimer = timer
@@ -1385,6 +1387,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     let added = items.map { Download($0) }
                     for (info, item) in zip(items, added) {
                         item.thumbnailURL = Self.thumbnailURL(info["thumbnail"])
+                        item.playlistTitle = info["playlist_title"] as? String
                     }
                     self.downloads.append(contentsOf: added)
                     if let first = added.first {
@@ -1430,8 +1433,12 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                                         source: nil, format: "FLAC", inspect: true, status: { [weak self] message in
             self?.setFooterStatus(localized(message))
         },
-                                        event: { _, data in
-            metadata = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                                        event: { [weak self] kind, data in
+            if kind == "YTDL_VERIFICATION_RESULT" {
+                self?.showVerificationResult(data)
+            } else if kind == "YTDL_METADATA" {
+                metadata = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            }
         }, finish: { [weak self, weak item] code, message in
             guard let self = self, let item = item else { return }
             item.process = nil
@@ -1441,6 +1448,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             } else if code == 0, let info = metadata,
                       let tracks = info["tracks"] as? [[String: Any]], !tracks.isEmpty {
                 self.expandMusic(item, tracks: tracks, collection: info["kind"] as? String != "track",
+                                 playlist: info["kind"] as? String == "playlist" ? (info["playlist_title"] as? String ?? localized("Playlist")) : nil,
                                  skipped: info["skipped"] as? Int ?? 0)
             } else if item.status != "Paused" {
                 item.lastError = message.isEmpty ? localized("Could not read music tracks.") : message
@@ -1459,17 +1467,21 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         refresh()
     }
 
-    private func expandMusic(_ item: Download, tracks: [[String: Any]], collection: Bool, skipped: Int) {
+    private func expandMusic(_ item: Download, tracks: [[String: Any]], collection: Bool, playlist: String?, skipped: Int) {
         guard let index = downloads.firstIndex(where: { $0 === item }) else { return }
         let autoDownload = NativePreferences.read()["auto"] as? Bool == true
         let added = tracks.enumerated().compactMap { offset, track -> Download? in
             guard let name = track["name"] as? String, let artist = track["artists"] as? String,
-                  let encoded = try? JSONSerialization.data(withJSONObject: track) else { return nil }
+                  !name.isEmpty, !artist.isEmpty else { return nil }
+            var metadata = track
+            if playlist != nil { metadata["playlist_index"] = offset + 1 }
+            guard let encoded = try? JSONSerialization.data(withJSONObject: metadata) else { return nil }
             let row = collection ? Download(["url": item.url, "index": offset + 1]) : item
             row.title = "\(artist) — \(name)"
             row.music = true
             row.musicTrackJSON = String(decoding: encoded, as: UTF8.self)
             row.musicCollection = collection ? item.id : nil
+            row.playlistTitle = playlist
             row.musicSource = item.musicSource
             row.musicFormat = item.musicFormat
             row.status = item.status
@@ -1817,7 +1829,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let path = link?.path ?? ""
         let audio = artlist ? !path.hasPrefix("/stock-footage/clip/") :
             ["MP3", "M4A"].contains(selectedMode) && !item.url.contains("instagram.com/")
-        let destination = outputFolder(for: audio ? "audio_folder" : "video_folder")
+        let destination = downloadFolder(for: item, audio: audio)
         let engineMode = selectedMode == "best" && !engineUsesModeKeys ? "Лучшее видео" : selectedMode
         var request: [String: Any] = ["url": item.url, "mode": engineMode, "folder": destination.path,
                                       "temporary": temp.appendingPathComponent(item.id.uuidString).path]
@@ -1897,15 +1909,36 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
     }
 
+    private func downloadFolder(for item: Download, audio: Bool) -> URL {
+        let folder = outputFolder(for: audio ? "audio_folder" : "video_folder")
+        guard let title = item.playlistTitle else { return folder }
+        let invalidCharacters = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/:"))
+        let name = title.components(separatedBy: invalidCharacters).joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        let shortened = String(decoding: name.utf8.prefix(180), as: UTF8.self)
+        return folder.appendingPathComponent(shortened.isEmpty ? localized("Playlist") : shortened, isDirectory: true)
+    }
+
+    private func showVerificationResult(_ data: Data) {
+        guard let success = try? JSONDecoder().decode(Bool.self, from: data) else { return }
+        setFooterStatus(localized(success ? "Verification successful." : "Verification failed."), duration: 5)
+    }
+
     private func beginMusic(_ item: Download, format: String) {
         item.scheduled = false
         item.status = "Connecting…"
-        item.progress = 0
+        item.progress = nil
         item.lastError = ""
+        let busySlots = Set(downloads.compactMap { row -> Int? in
+            guard row.process != nil else { return nil }
+            return row.inspectingMusic ? 0 : row.musicWorkerSlot
+        })
+        let slot = (0..<10).first { !busySlots.contains($0) } ?? 0
+        item.musicWorkerSlot = slot
         let source = explicitMusicSource(for: item)
         appendLog("Music · " + item.title + " · " + (source ?? localized("Automatic")) + " · " + format)
-        item.process = musicPreview.run(link: item.url, folder: outputFolder(for: "audio_folder"),
-                                        source: source, format: format, trackJSON: item.musicTrackJSON,
+        item.process = musicPreview.run(link: item.url, folder: downloadFolder(for: item, audio: true),
+                                        source: source, format: format, trackJSON: item.musicTrackJSON, workerSlot: slot,
                                         status: { [weak self, weak item] message in
             guard let self = self, let item = item, item.status != "Paused" else { return }
             self.setFooterStatus(message)
@@ -1914,6 +1947,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }, log: { [weak self] message in
             self?.appendLog("Music · " + message)
         }, event: { [weak self, weak item] kind, data in
+            if kind == "YTDL_VERIFICATION_RESULT" { self?.showVerificationResult(data) }
             if kind == "YTDL_PROGRESS", let item = item, item.status != "Paused",
                let percent = try? JSONDecoder().decode(Double.self, from: data) {
                 item.status = "Downloading"
@@ -1935,7 +1969,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 item.lastError = item.done ? "" : message
                 self.appendLog("Music · " + item.status + " · " + item.title)
                 if !item.done { self.unlockMusicOptions(item) }
-                self.setFooterStatus(item.lastError, error: true)
+                if !item.done { self.setFooterStatus(item.lastError, error: true) }
                 self.notify(item.done ? "Download completed" : "Download failed", body: item.title,
                             setting: item.done ? "notify_completed" : "notify_failed", enabledByDefault: true)
             }
