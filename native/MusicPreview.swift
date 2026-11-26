@@ -30,7 +30,7 @@ final class MusicPreview {
                 .contains { host == "music.amazon." + $0 }
     }
 
-    func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false, trackJSON: String? = nil, maintenance: String? = nil, workerSlot: Int = 0,
+    func run(link: String, folder: URL, source: String?, format: String, inspect: Bool = false, trackJSON: String? = nil, maintenance: String? = nil,
              status: @escaping (String) -> Void,
              log: @escaping (String) -> Void = { _ in },
              event: @escaping (String, Data) -> Void,
@@ -45,7 +45,6 @@ final class MusicPreview {
         if inspect { arguments.append("--inspect") }
         if let maintenance = maintenance { arguments += ["--maintenance", maintenance] }
         if let trackJSON = trackJSON { arguments += ["--track-json", trackJSON] }
-        if workerSlot > 0 { arguments += ["--worker-slot", String(workerSlot)] }
         worker.arguments = arguments
         worker.standardOutput = pipe
         worker.standardError = pipe

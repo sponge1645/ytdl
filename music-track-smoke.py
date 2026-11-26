@@ -764,7 +764,6 @@ if __name__ == "__main__":
     parser.add_argument("--inspect", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--format", choices=("FLAC", "FLAC-CD", "M4A", "MP3", *DOLBY_FORMATS), default="FLAC")
     parser.add_argument("--track-json", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-slot", type=int, choices=range(10), default=0, help=argparse.SUPPRESS)
     parser.add_argument("--maintenance", choices=("check", "reinstall"), help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.output.exists() and not args.gui:
@@ -772,8 +771,6 @@ if __name__ == "__main__":
     try:
         os.umask(0o077)
         home = Path.home() / "Library/Application Support/YTDL/Music Preview"
-        if args.gui and not args.inspect and not args.maintenance and args.worker_slot:
-            home = home / "workers" / str(args.worker_slot)
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
         if args.maintenance:
             maintain_metadata_extensions(args, home)

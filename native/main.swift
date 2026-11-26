@@ -13,7 +13,6 @@ private final class Download {
     var music = false
     var musicTrackJSON: String?
     var inspectingMusic = false
-    var musicWorkerSlot: Int?
     var musicCollection: UUID?
     var playlistTitle: String?
     var musicFormat = "FLAC"
@@ -1809,10 +1808,13 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let limit = NativePreferences.read()["parallel"] as? Int ?? 3
         let available = max(0, min(max(limit, 1), 10) - active)
         var remaining = available
+        var musicActive = downloads.contains { $0.music && $0.process != nil }
         for item in downloads where item.scheduled && !item.pendingRemoval && item.process == nil {
             guard remaining > 0 else { break }
+            if item.music && musicActive { continue }
             begin(item)
-            remaining -= 1
+            if item.music { musicActive = item.process != nil }
+            if item.process != nil { remaining -= 1 }
         }
         refresh()
     }
@@ -1929,16 +1931,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.status = "Connecting…"
         item.progress = nil
         item.lastError = ""
-        let busySlots = Set(downloads.compactMap { row -> Int? in
-            guard row.process != nil else { return nil }
-            return row.inspectingMusic ? 0 : row.musicWorkerSlot
-        })
-        let slot = (0..<10).first { !busySlots.contains($0) } ?? 0
-        item.musicWorkerSlot = slot
         let source = explicitMusicSource(for: item)
         appendLog("Music · " + item.title + " · " + (source ?? localized("Automatic")) + " · " + format)
         item.process = musicPreview.run(link: item.url, folder: downloadFolder(for: item, audio: true),
-                                        source: source, format: format, trackJSON: item.musicTrackJSON, workerSlot: slot,
+                                        source: source, format: format, trackJSON: item.musicTrackJSON,
                                         status: { [weak self, weak item] message in
             guard let self = self, let item = item, item.status != "Paused" else { return }
             self.setFooterStatus(message)
