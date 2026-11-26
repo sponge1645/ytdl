@@ -199,6 +199,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private let completedCount = NSTextField(labelWithString: "0")
     private let status = NSTextField(labelWithString: localized("Preparing download tools…"))
     private var statusClearTimer: Timer?
+    private var footerStatusOwner: UUID?
     let title = NSTextField(labelWithString: localized("Queue"))
     let empty = EmptyQueueView()
     let mode = NSSegmentedControl(labels: [localized("Video"), localized("Audio")], trackingMode: .selectOne, target: nil, action: nil)
@@ -669,7 +670,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             .appendingPathComponent(engineArchitecture)
     }
 
-    private func setFooterStatus(_ message: String, error: Bool = false, duration: TimeInterval? = nil) {
+    private func setFooterStatus(_ message: String, error: Bool = false, duration: TimeInterval? = nil,
+                                 owner: UUID? = nil) {
+        footerStatusOwner = error ? nil : owner
         statusClearTimer?.invalidate()
         statusClearTimer = nil
         if status.stringValue != message {
@@ -684,6 +687,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             statusClearTimer = timer
             RunLoop.main.add(timer, forMode: .common)
         }
+    }
+
+    private func clearFooterStatus(for owner: UUID) {
+        if footerStatusOwner == owner { setFooterStatus("") }
     }
 
     private func process(_ arguments: [String], executable: URL? = nil, event: @escaping ([String: Any]) -> Void,
@@ -960,6 +967,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             updateInstallStep(6)
         }
         var engineError = ""
+        let footerOwner = UUID()
         let setup = process(["setup"], event: { [weak self] message in
             if message["event"] as? String == "capabilities" {
                 self?.engineSupportsArtlist = message["artlist_preview"] as? Bool == true
@@ -968,10 +976,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
             if let label = message["status"] as? String {
                 engineError = localized(label)
-                self?.setFooterStatus(engineError, error: message["event"] as? String == "error")
+                self?.setFooterStatus(engineError, error: message["event"] as? String == "error", owner: footerOwner)
             }
         }, finish: { [weak self] code in
             guard let self = self else { return }
+            self.clearFooterStatus(for: footerOwner)
             if code != 0 && self.isUniversalDownload {
                 self.showInstallError(engineError.isEmpty ? localized("Download engine unavailable") : engineError)
                 return
@@ -1378,10 +1387,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 continue
             }
             showMusicControls(for: nil)
-            setFooterStatus(localized("Reading link…"))
+            let footerOwner = UUID()
+            setFooterStatus(localized("Reading link…"), owner: footerOwner)
             var needsYouTubeSession = false
             var inspectError = ""
-            _ = process(["inspect", link], event: { [weak self] message in
+            let task = process(["inspect", link], event: { [weak self] message in
                 guard let self = self else { return }
                 if message["event"] as? String == "youtube_session_required" {
                     needsYouTubeSession = true
@@ -1400,21 +1410,23 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                         added.forEach { self.schedule($0) }
                         self.dispatch()
                     }
-                    if self.status.stringValue == localized("Reading link…") { self.setFooterStatus("") }
                     self.refresh()
                 } else if let label = message["status"] as? String {
                     let isError = message["event"] as? String == "error"
                     if isError { inspectError = label }
                     needsYouTubeSession = needsYouTubeSession || (isError && self.isYouTubeSessionError(label, for: link))
-                    self.setFooterStatus(localized(label), error: isError)
+                    self.setFooterStatus(localized(label), error: isError, owner: footerOwner)
                 }
             }, finish: { [weak self] code in
-                guard let self = self, code != 0 else { return }
+                guard let self = self else { return }
+                self.clearFooterStatus(for: footerOwner)
+                guard code != 0 else { return }
                 if self.showSafariAccessIfNeeded(inspectError) { return }
                 guard canAskForYouTubeSession, needsYouTubeSession,
                       self.requestYouTubeSession(for: link) else { return }
                 self.addLinks([link], canAskForYouTubeSession: false)
             })
+            if task == nil { clearFooterStatus(for: footerOwner) }
         }
     }
 
@@ -1432,8 +1444,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         var metadata: [String: Any]?
         item.inspectingMusic = true
         item.process = musicPreview.run(link: link, folder: outputFolder(for: "audio_folder"),
-                                        source: nil, format: "FLAC", inspect: true, status: { [weak self] message in
-            self?.setFooterStatus(localized(message))
+                                        source: nil, format: "FLAC", inspect: true, status: { [weak self, weak item] message in
+            guard let item = item, item.status != "Paused" else { return }
+            self?.setFooterStatus(localized(message), owner: item.id)
         },
                                         event: { [weak self] kind, data in
             if kind == "YTDL_VERIFICATION_RESULT" {
@@ -1443,6 +1456,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
         }, finish: { [weak self, weak item] code, message in
             guard let self = self, let item = item else { return }
+            self.clearFooterStatus(for: item.id)
             item.process = nil
             item.inspectingMusic = false
             if item.pendingRemoval {
@@ -1503,7 +1517,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
         downloads.replaceSubrange(index...index, with: added)
         if skipped > 0 {
-            setFooterStatus(String(format: localized("%d unavailable tracks skipped."), skipped))
+            setFooterStatus(String(format: localized("%d unavailable tracks skipped."), skipped), duration: 5)
         }
         refresh(replacing: item.id, with: added.first?.id)
     }
@@ -1717,6 +1731,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.scheduled = false
         item.status = "Paused"
         item.progress = nil
+        clearFooterStatus(for: item.id)
         if !item.inspectingMusic, let process = item.process, process.isRunning {
             for peer in downloads where peer !== item && peer.process === process {
                 peer.musicBatchInterrupted = true
@@ -1878,7 +1893,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 needsYouTubeSession = true
             case "youtube_session":
                 if item.status != "Paused", let label = message["status"] as? String {
-                    self.setFooterStatus(localized(label))
+                    self.setFooterStatus(localized(label), owner: item.id)
                 }
             case "progress":
                 if item.status != "Paused" {
@@ -1898,6 +1913,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             self.refreshStatus(for: item)
         }, finish: { [weak self, weak item] code in
             guard let self = self, let item = item else { return }
+            self.clearFooterStatus(for: item.id)
             item.process = nil
             item.progress = nil
             if item.pendingRemoval {
@@ -1962,7 +1978,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                                         source: source, format: format, trackJSON: item.musicTrackJSON,
                                         status: { [weak self, weak item] message in
             guard let self = self, let item = item, item.status != "Paused" else { return }
-            self.setFooterStatus(message)
+            self.setFooterStatus(message, owner: item.id)
             item.status = "Downloading"
             self.refresh()
         }, log: { [weak self] message in
@@ -1980,6 +1996,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
         }, finish: { [weak self, weak item] code, message in
             guard let self = self, let item = item else { return }
+            self.clearFooterStatus(for: item.id)
             self.finishMusic(item, code: code, message: message)
             self.dispatch()
             if item.done { self.finishQueueIfNeeded(last: item) }
@@ -1996,6 +2013,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func beginMusicPair(_ first: Download, _ second: Download, source: String?) -> Bool {
         let items = [first, second]
+        let footerOwner = UUID()
         let entries = items.map { ["url": $0.url, "track": $0.musicTrackJSON ?? "",
                                    "format": $0.startedMode ?? $0.musicFormat] }
         guard let payload = try? JSONSerialization.data(withJSONObject: entries) else { return false }
@@ -2003,7 +2021,10 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let process = musicPreview.run(link: first.url, folder: downloadFolder(for: first, audio: true),
                                        source: source, format: first.startedMode ?? first.musicFormat,
                                        batch: String(decoding: payload, as: UTF8.self),
-                                       status: { [weak self] message in self?.setFooterStatus(message) },
+                                       status: { [weak self] message in
+            guard items.contains(where: { $0.status != "Paused" }) else { return }
+            self?.setFooterStatus(message, owner: footerOwner)
+        },
                                        log: { [weak self] message in self?.appendLog("Music · " + message) },
                                        event: { [weak self] kind, data in
             guard let self = self else { return }
@@ -2023,6 +2044,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
         }, finish: { [weak self] code, message in
             guard let self = self else { return }
+            self.clearFooterStatus(for: footerOwner)
             for (index, item) in items.enumerated() {
                 let result = results[index]
                 if let file = result?["file"] { item.files = [URL(fileURLWithPath: file)] }
