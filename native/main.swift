@@ -1069,18 +1069,16 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         NSApp.orderFrontStandardAboutPanel(nil)
     }
 
-    private static let lastAutomaticAppUpdateCheck = "lastAutomaticAppUpdateCheck"
+    private var checkedAppUpdatesThisLaunch = false
     private var checkingAppUpdates = false
     private var lastAutomaticAppUpdateAttempt: Date?
     private var showAppUpdateResult = false
 
     private func checkForAppUpdatesAutomatically() {
-        guard !checkingAppUpdates, toolsReady, window.attachedSheet == nil,
+        guard !checkedAppUpdatesThisLaunch, !checkingAppUpdates, !installingAppUpdate,
+              toolsReady, window.attachedSheet == nil,
               NativePreferences.automaticAppUpdateChecksEnabled else { return }
-        let defaults = UserDefaults.standard
         let now = Date()
-        if let last = defaults.object(forKey: Self.lastAutomaticAppUpdateCheck) as? Date,
-           last <= now, now.timeIntervalSince(last) < 24 * 60 * 60 { return }
         if let last = lastAutomaticAppUpdateAttempt, last <= now,
            now.timeIntervalSince(last) < 5 * 60 { return }
         lastAutomaticAppUpdateAttempt = now
@@ -1125,7 +1123,11 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     if manual { self.showAppUpdateMessage("Could not check for app updates.") }
                     return
                 }
-                defaults.set(Date(), forKey: Self.lastAutomaticAppUpdateCheck)
+                if !manual && self.window.attachedSheet != nil {
+                    self.lastAutomaticAppUpdateAttempt = nil
+                    return
+                }
+                self.checkedAppUpdatesThisLaunch = true
                 guard Self.compareAppVersions(installed, update.version) == .orderedAscending else {
                     if manual { self.showAppUpdateMessage("You’re up to date.") }
                     return
