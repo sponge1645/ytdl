@@ -1,4 +1,6 @@
+import itertools
 import json
+import queue
 from contextlib import nullcontext, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -42,7 +44,7 @@ class MusicSourceTests(unittest.TestCase):
         self.check_download(None, "track_not_found", ["amazon", "tidal-web", "qobuz-web"], True)
 
     def test_dolby_provider_errors_allow_automatic_flac(self):
-        for error in ("api_error", "timeout"):
+        for error in ("api_error", "timeout", "network_error", "no_callback"):
             with self.subTest(error=error):
                 self.check_download(None, error, ["amazon", "tidal-web", "qobuz-web"], True)
 
@@ -63,8 +65,33 @@ class MusicSourceTests(unittest.TestCase):
     def test_manual_amazon_does_not_fall_back(self):
         self.check_download("amazon", "track_not_found", ["amazon"], False)
 
-    def test_engine_error_does_not_trigger_fallback(self):
-        self.check_download(None, "network_error", ["amazon"], False)
+    def test_manual_amazon_timeout_does_not_fall_back(self):
+        self.check_download("amazon", "no_callback", ["amazon"], False)
+
+    def test_engine_ignores_late_reply_after_timeout(self):
+        engine_class = RUN.__globals__["Engine"]
+        engine = engine_class.__new__(engine_class)
+        engine.ids = itertools.count(1)
+        engine.lib = Mock()
+        engine.replies = Mock()
+        engine.replies.get.side_effect = [
+            queue.Empty,
+            (1, 1, b'{"message":"cancelled"}'),
+            (2, 0, b'{"success":true}'),
+        ]
+        with self.assertRaisesRegex(RUN.__globals__["EngineRequestError"], "timed out"):
+            engine.call("downloadByStrategy", {})
+        engine.lib.mornye_cancel.assert_called_once_with(1)
+        self.assertEqual(engine.call("downloadByStrategy", {}), {"success": True})
+
+    def test_automatic_compressed_formats_have_fallbacks(self):
+        attempts = RUN.__globals__["download_attempts"]
+        for audio_format in ("M4A", "MP3"):
+            with self.subTest(audio_format=audio_format):
+                plan = list(attempts("spotify-web", None, audio_format))
+                self.assertEqual(plan[0], ("amazon", audio_format))
+                self.assertIn(("ytmusic-spotiflac", audio_format), plan)
+                self.assertTrue(all(fmt == audio_format for _, fmt in plan))
 
     def check_download(self, source, error_type, services, success):
         requests = []
@@ -78,6 +105,8 @@ class MusicSourceTests(unittest.TestCase):
                 path = Path(request["output_path"])
                 path.write_bytes(b"fLaC")
                 return {"success": True, "file_path": str(path)}
+            if error_type == "no_callback":
+                raise RUN.__globals__["EngineRequestError"]("downloadByStrategy timed out.")
             return {"success": False, "error_type": error_type}
 
         def copy_tags(path, destination, track, codec):
@@ -100,7 +129,10 @@ class MusicSourceTests(unittest.TestCase):
                 if success:
                     RUN(args, root)
                 else:
-                    message = "track not found in Dolby Digital Plus" if error_type == "track_not_found" else error_type
+                    message = {
+                        "track_not_found": "track not found in Dolby Digital Plus",
+                        "no_callback": "timed out",
+                    }.get(error_type, error_type)
                     with self.assertRaisesRegex(RuntimeError, message):
                         RUN(args, root)
             self.assertEqual(list(root.glob("*.flac")), [root / "Artist - Song.flac"] if success else [])

@@ -18,6 +18,7 @@ import shutil
 import re
 import subprocess
 import tempfile
+import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import urlopen
 from uuid import uuid4
@@ -46,6 +47,10 @@ DOWNLOADERS = {
     "qobuz-web": ("qobuz-web", "HI_RES_LOSSLESS", "Qobuz"),
     "deezer": ("deezer", "flac", "Deezer"),
 }
+
+
+class EngineRequestError(RuntimeError):
+    pass
 
 
 class Engine:
@@ -97,12 +102,19 @@ class Engine:
         call_id = next(self.ids)
         payload = json.dumps(args).encode()
         self.lib.mornye_call(call_id, method.encode(), payload, len(payload), None, 0)
-        try:
-            reply_id, kind, data = self.replies.get(timeout=180)
-        except queue.Empty:
-            self.lib.mornye_cancel(call_id)
-            raise RuntimeError(f"{method} timed out.") from None
-        if reply_id != call_id or kind != 0:
+        deadline = time.monotonic() + 180
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise queue.Empty
+                reply_id, kind, data = self.replies.get(timeout=remaining)
+            except queue.Empty:
+                self.lib.mornye_cancel(call_id)
+                raise EngineRequestError(f"{method} timed out.") from None
+            if reply_id == call_id:
+                break
+        if kind != 0:
             detail = ""
             try:
                 error = json.loads(data)
@@ -110,7 +122,7 @@ class Engine:
                     detail = " ".join(error["message"].split())[:500]
             except ValueError:
                 pass
-            raise RuntimeError(f"{method}: {detail or f'callback kind {kind}'}")
+            raise EngineRequestError(f"{method}: {detail or f'callback kind {kind}'}")
         result = json.loads(data)
         if isinstance(result, str):
             try:
@@ -334,7 +346,10 @@ FLAC_SOURCES = (*CD_QUALITY_SOURCES, "amazon", "deezer", "beatport")
 UNAVAILABLE_ERRORS = {
     "not_found", "track_not_found", "no_match", "no_results", "unavailable",
     "track_unavailable", "format_unavailable", "quality_unavailable",
-    "unsupported_format", "unsupported_quality", "api_error", "timeout",
+    "unsupported_format", "unsupported_quality",
+}
+PROVIDER_ERRORS = {
+    "api_error", "timeout", "network_error",
 }
 
 
@@ -371,6 +386,8 @@ def download_attempts(provider, source, audio_format):
     elif audio_format in {"FLAC", "FLAC-CD"}:
         services = FLAC_SOURCES if audio_format == "FLAC" else CD_QUALITY_SOURCES
         yield from ((service, audio_format) for service in services if service != primary)
+    elif audio_format in {"M4A", "MP3"}:
+        yield from ((service, audio_format) for service in DOWNLOADERS if service != primary)
 
 
 def log_media_error(stage, result, secret=""):
@@ -632,16 +649,23 @@ def download_track(engine, track, provider, service, audio_format, output, desti
     if gui:
         engine.progress_item = request["item_id"]
         engine.lib.mornye_subscribe(10)
-    result = engine.call("downloadByStrategy", json.dumps(request))
+    format_label = DOLBY_LABELS.get(audio_format, audio_format)
+
+    def request_audio():
+        try:
+            return engine.call("downloadByStrategy", json.dumps(request))
+        except EngineRequestError as error:
+            raise AudioUnavailable(f"{label}: could not retrieve the track in {format_label}. {error}") from error
+
+    result = request_audio()
     if isinstance(result, dict) and result.get("error_type") == "verification_required":
-        result = verify(engine, service, gui, lambda: engine.call("downloadByStrategy", json.dumps(request)))
+        result = verify(engine, service, gui, request_audio)
     if not isinstance(result, dict) or result.get("success") is not True:
         reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
-        error_type = AudioUnavailable if isinstance(reason, str) and reason in UNAVAILABLE_ERRORS else RuntimeError
+        error_type = AudioUnavailable if isinstance(reason, str) and reason in UNAVAILABLE_ERRORS | PROVIDER_ERRORS else RuntimeError
         http_status = provider_http_status(result)
         detail = f"{reason}, HTTP {http_status}" if http_status else reason
-        format_label = DOLBY_LABELS.get(audio_format, audio_format)
-        if error_type is AudioUnavailable and reason not in {"api_error", "timeout"}:
+        if isinstance(reason, str) and reason in UNAVAILABLE_ERRORS:
             raise AudioUnavailable(f"{label}: track not found in {format_label} ({detail}).")
         raise error_type(f"{label}: could not retrieve the track in {format_label} ({detail}).")
     reported = result.get("file_path")
