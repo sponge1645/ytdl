@@ -68,6 +68,7 @@ class Engine:
         self.lib.mornye_subscribe.argtypes = [ctypes.c_int32]
         self.lib.mornye_subscribe.restype = None
         self.progress_item = None
+        self.probe_items = {}
         self.last_percent = -1
         self.replies = queue.Queue()
         self.ids = itertools.count(1)
@@ -84,8 +85,12 @@ class Engine:
         try:
             if call_id and kind in (0, 1, 2):
                 self.replies.put((call_id, kind, ctypes.string_at(data, length)))
-            elif kind == 10 and self.progress_item and data:
+            elif kind == 10 and (self.progress_item or self.probe_items) and data:
                 payload = json.loads(ctypes.string_at(data, length))
+                for item_id, number in self.probe_items.items():
+                    status = payload.get("items", {}).get(item_id, {})
+                    if 0 < status.get("progress", 0) < 1:
+                        print(f"{time.monotonic():.3f} Track {number}: {status['progress']:.1%}", flush=True)
                 item = payload.get("items", {}).get(self.progress_item, {})
                 if item.get("bytes_total", 0) > 0 or item.get("progress", 0) > 0:
                     percent = min(100, max(0, int(item["progress"] * 100)))
@@ -98,11 +103,18 @@ class Engine:
             if data:
                 self.lib.mornye_free(data, length)
 
-    def call(self, method, args):
+    def submit(self, method, args):
         call_id = next(self.ids)
         payload = json.dumps(args).encode()
         self.lib.mornye_call(call_id, method.encode(), payload, len(payload), None, 0)
-        deadline = time.monotonic() + 180
+        return call_id
+
+    def call(self, method, args):
+        call_id = self.submit(method, args)
+        _, kind, data = self.wait_for_reply({call_id}, time.monotonic() + 180, method)
+        return self.decode_reply(kind, data, method)
+
+    def wait_for_reply(self, pending, deadline, method):
         while True:
             remaining = deadline - time.monotonic()
             try:
@@ -110,10 +122,14 @@ class Engine:
                     raise queue.Empty
                 reply_id, kind, data = self.replies.get(timeout=remaining)
             except queue.Empty:
-                self.lib.mornye_cancel(call_id)
+                for call_id in pending:
+                    self.lib.mornye_cancel(call_id)
                 raise EngineRequestError(f"{method} timed out.") from None
-            if reply_id == call_id:
-                break
+            if reply_id in pending:
+                return reply_id, kind, data
+
+    @staticmethod
+    def decode_reply(kind, data, method):
         if kind != 0:
             detail = ""
             try:
@@ -608,9 +624,92 @@ def run(args, home):
         raise RuntimeError(" ".join(failures))
 
 
+def audio_request(track, provider, service, quality, output, extension):
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
+    stem = " ".join(stem.split()).strip(". ")
+    stem = stem.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(". ") or "Track"
+    request = {
+        "contract_version": 1, "service": service, "download_provider": service,
+        "track_name": track["name"], "artist_name": track["artists"],
+        "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
+        "album_name": track.get("album_name") or "", "cover_url": track["cover_url"],
+        "output_dir": str(output), "output_path": str(output / f"{stem}{extension}"),
+        "output_ext": extension,
+        "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
+        "use_fallback": False, "embed_metadata": True,
+    }
+    if service == provider and service in {"beatport", "jiosaavn", "ytmusic-spotiflac"}:
+        request["provider_track_id"] = track.get("id") or ""
+    if provider == "spotify-web":
+        request["spotify_id"] = track.get("spotify_id") or track.get("id") or ""
+    for field in ("track_number", "disc_number", "total_tracks", "total_discs"):
+        value = track.get(field)
+        if type(value) is int and value > 0:
+            request[field] = value
+    return stem, request
+
+
+def parallel_probe(args, home):
+    method = "downloadByStrategy"
+    service = args.source or "amazon"
+    package, quality, label = DOWNLOADERS[service]
+    extension = ".m4a" if service in {"ytmusic-spotiflac", "jiosaavn"} else ".flac"
+    provider = metadata_provider(args.url)
+    library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
+    output = args.output.resolve()
+    output.mkdir()
+    with open_music_engine(library, home, output) as engine:
+        engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
+        install_package(engine, home, provider)
+        if provider != package:
+            install_package(engine, home, package)
+        _, tracks, _, _ = resolve_music_link(engine, args.url, provider, False)
+        if len(tracks) < 3:
+            raise RuntimeError("Use an album or playlist with at least three tracks.")
+        engine.call("setDownloadDirectory", {"path": str(output)})
+        requests = []
+        for number, track in enumerate(tracks[:3], 1):
+            stem, request = audio_request(track, provider, service, quality, output, extension)
+            request["output_path"] = str(output / f"{number} - {stem}{extension}")
+            requests.append(request)
+
+        print(f"Provider: {label}. Checking the session with track 1.", flush=True)
+        def warmup():
+            return engine.call(method, json.dumps(requests[0]))
+
+        result = warmup()
+        if isinstance(result, dict) and result.get("error_type") == "verification_required":
+            result = verify(engine, service, False, warmup)
+        if not isinstance(result, dict) or result.get("success") is not True:
+            reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
+            raise RuntimeError(f"Track 1 failed ({reason}). The parallel test did not run.")
+
+        engine.probe_items = {request["item_id"]: number for number, request in enumerate(requests[1:], 2)}
+        engine.lib.mornye_subscribe(10)
+        pending = {}
+        for number, request in enumerate(requests[1:], 2):
+            print(f"{time.monotonic():.3f} Submitting track {number}", flush=True)
+            pending[engine.submit(method, json.dumps(request))] = number
+        deadline = time.monotonic() + 180
+        failed = False
+        while pending:
+            call_id, kind, data = engine.wait_for_reply(pending, deadline, method)
+            number = pending.pop(call_id)
+            try:
+                result = engine.decode_reply(kind, data, method)
+                success = isinstance(result, dict) and result.get("success") is True
+                status = "success" if success else (
+                    result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response")
+            except EngineRequestError:
+                success, status = False, "engine error"
+            print(f"{time.monotonic():.3f} Track {number} finished: {status}", flush=True)
+            failed = failed or not success
+        if failed:
+            raise RuntimeError("At least one parallel request failed. See the track results above.")
+
+
 def download_track(engine, track, provider, service, audio_format, output, destination_folder, gui):
     _, quality, label = DOWNLOADERS[service]
-    cover = track["cover_url"]
     engine.call("setDownloadDirectory", {"path": str(output)})
     dolby = DOLBY_FORMATS.get(audio_format)
     compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and audio_format == "M4A")
@@ -625,27 +724,7 @@ def download_track(engine, track, provider, service, audio_format, output, desti
         _, quality, extension, expected_codec = dolby
     print(f"Searching {label} ({audio_format}) for {track['artists']} — {track['name']}", flush=True)
     print(f"Audio request: source={service} · quality={quality} · extension={extension}", flush=True)
-    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
-    stem = " ".join(stem.split()).strip(". ")
-    stem = stem.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(". ") or "Track"
-    request = {
-        "contract_version": 1, "service": service, "download_provider": service,
-        "track_name": track["name"], "artist_name": track["artists"],
-        "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
-        "album_name": track.get("album_name") or "", "cover_url": cover,
-        "output_dir": str(output), "output_path": str(output / f"{stem}{extension}"),
-        "output_ext": extension,
-        "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
-        "use_fallback": False, "embed_metadata": True,
-    }
-    if service == provider and service in {"beatport", "jiosaavn", "ytmusic-spotiflac"}:
-        request["provider_track_id"] = track.get("id") or ""
-    if provider == "spotify-web":
-        request["spotify_id"] = track.get("spotify_id") or track.get("id") or ""
-    for field in ("track_number", "disc_number", "total_tracks", "total_discs"):
-        value = track.get(field)
-        if type(value) is int and value > 0:
-            request[field] = value
+    stem, request = audio_request(track, provider, service, quality, output, extension)
     if gui:
         engine.progress_item = request["item_id"]
         engine.lib.mornye_subscribe(10)
@@ -765,14 +844,19 @@ if __name__ == "__main__":
     parser.add_argument("--format", choices=("FLAC", "FLAC-CD", "M4A", "MP3", *DOLBY_FORMATS), default="FLAC")
     parser.add_argument("--track-json", help=argparse.SUPPRESS)
     parser.add_argument("--maintenance", choices=("check", "reinstall"), help=argparse.SUPPRESS)
+    parser.add_argument("--parallel-probe", action="store_true", help="Test two downloads within one verified engine session")
     args = parser.parse_args()
+    if args.parallel_probe and (args.gui or args.inspect or args.maintenance or args.track_json):
+        parser.error("--parallel-probe must be run by itself with an album or playlist URL.")
     if args.output.exists() and not args.gui:
         parser.error("Choose a new output directory so the test cannot match an old file.")
     try:
         os.umask(0o077)
         home = Path.home() / "Library/Application Support/YTDL/Music Preview"
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if args.maintenance:
+        if args.parallel_probe:
+            parallel_probe(args, home)
+        elif args.maintenance:
             maintain_metadata_extensions(args, home)
         elif args.gui:
             folder = home if args.inspect else args.output.resolve()

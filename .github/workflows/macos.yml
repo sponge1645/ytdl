@@ -1,5 +1,7 @@
 name: Build macOS app
 on:
+  push:
+    branches: [test/music-session-parallel]
   workflow_dispatch:
     inputs:
       publish:
