@@ -68,6 +68,7 @@ class Engine:
         self.lib.mornye_subscribe.argtypes = [ctypes.c_int32]
         self.lib.mornye_subscribe.restype = None
         self.progress_item = None
+        self.batch_items = {}
         self.last_percent = -1
         self.replies = queue.Queue()
         self.ids = itertools.count(1)
@@ -84,8 +85,13 @@ class Engine:
         try:
             if call_id and kind in (0, 1, 2):
                 self.replies.put((call_id, kind, ctypes.string_at(data, length)))
-            elif kind == 10 and self.progress_item and data:
+            elif kind == 10 and (self.progress_item or self.batch_items) and data:
                 payload = json.loads(ctypes.string_at(data, length))
+                for item_id, number in self.batch_items.items():
+                    status = payload.get("items", {}).get(item_id, {})
+                    progress = status.get("progress", 0)
+                    if progress > 0:
+                        print("YTDL_BATCH_PROGRESS " + json.dumps([number, int(progress * 100)]), flush=True)
                 item = payload.get("items", {}).get(self.progress_item, {})
                 if item.get("bytes_total", 0) > 0 or item.get("progress", 0) > 0:
                     percent = min(100, max(0, int(item["progress"] * 100)))
@@ -98,11 +104,18 @@ class Engine:
             if data:
                 self.lib.mornye_free(data, length)
 
-    def call(self, method, args):
+    def submit(self, method, args):
         call_id = next(self.ids)
         payload = json.dumps(args).encode()
         self.lib.mornye_call(call_id, method.encode(), payload, len(payload), None, 0)
-        deadline = time.monotonic() + 180
+        return call_id
+
+    def call(self, method, args):
+        call_id = self.submit(method, args)
+        _, kind, data = self.wait_for_reply({call_id}, time.monotonic() + 180, method)
+        return self.decode_reply(kind, data, method)
+
+    def wait_for_reply(self, pending, deadline, method):
         while True:
             remaining = deadline - time.monotonic()
             try:
@@ -110,10 +123,14 @@ class Engine:
                     raise queue.Empty
                 reply_id, kind, data = self.replies.get(timeout=remaining)
             except queue.Empty:
-                self.lib.mornye_cancel(call_id)
+                for call_id in pending:
+                    self.lib.mornye_cancel(call_id)
                 raise EngineRequestError(f"{method} timed out.") from None
-            if reply_id == call_id:
-                break
+            if reply_id in pending:
+                return reply_id, kind, data
+
+    @staticmethod
+    def decode_reply(kind, data, method):
         if kind != 0:
             detail = ""
             try:
@@ -608,23 +625,7 @@ def run(args, home):
         raise RuntimeError(" ".join(failures))
 
 
-def download_track(engine, track, provider, service, audio_format, output, destination_folder, gui):
-    _, quality, label = DOWNLOADERS[service]
-    cover = track["cover_url"]
-    engine.call("setDownloadDirectory", {"path": str(output)})
-    dolby = DOLBY_FORMATS.get(audio_format)
-    compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and audio_format == "M4A")
-    if compressed and audio_format not in {"M4A", "MP3"}:
-        raise RuntimeError("Choose M4A or MP3 for this source.")
-    if compressed and service == "beatport":
-        quality = "HIGH"
-    extension = ".m4a" if compressed else ".flac"
-    if audio_format == "FLAC-CD":
-        quality = "LOSSLESS"
-    if dolby:
-        _, quality, extension, expected_codec = dolby
-    print(f"Searching {label} ({audio_format}) for {track['artists']} — {track['name']}", flush=True)
-    print(f"Audio request: source={service} · quality={quality} · extension={extension}", flush=True)
+def audio_request(track, provider, service, quality, output, extension):
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", f"{track['artists']} - {track['name']}")
     stem = " ".join(stem.split()).strip(". ")
     stem = stem.encode("utf-8")[:200].decode("utf-8", errors="ignore").rstrip(". ") or "Track"
@@ -632,7 +633,7 @@ def download_track(engine, track, provider, service, audio_format, output, desti
         "contract_version": 1, "service": service, "download_provider": service,
         "track_name": track["name"], "artist_name": track["artists"],
         "isrc": track.get("isrc") or "", "duration_ms": track.get("duration_ms") or 0,
-        "album_name": track.get("album_name") or "", "cover_url": cover,
+        "album_name": track.get("album_name") or "", "cover_url": track["cover_url"],
         "output_dir": str(output), "output_path": str(output / f"{stem}{extension}"),
         "output_ext": extension,
         "quality": quality, "item_id": str(uuid4()), "use_extensions": True,
@@ -646,6 +647,103 @@ def download_track(engine, track, provider, service, audio_format, output, desti
         value = track.get(field)
         if type(value) is int and value > 0:
             request[field] = value
+    return stem, request
+
+
+def download_batch(args, home):
+    method = "downloadByStrategy"
+    service = "tidal-web"
+    package, default_quality, _ = DOWNLOADERS[service]
+    batch = json.loads(args.batch)
+    if not isinstance(batch, list) or len(batch) != 2:
+        raise ValueError("Expected two Tidal tracks.")
+    library = args.app / "Contents/Frameworks/libmornye_desktop.dylib"
+    destination = args.output.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".ytdl-music-", dir=destination) as directory:
+        output = Path(directory)
+        with open_music_engine(library, home, output) as engine:
+            engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
+            install_package(engine, home, package)
+            engine.call("setDownloadDirectory", {"path": str(output)})
+            jobs = []
+            for number, entry in enumerate(batch):
+                track = track_metadata(json.loads(entry["track"]))
+                if not track:
+                    raise ValueError("Invalid queued track metadata.")
+                track["source_comment"] = source_comment(entry["url"])
+                fmt = entry["format"]
+                quality = "LOSSLESS" if fmt == "FLAC-CD" else default_quality
+                folder = output / str(number)
+                folder.mkdir()
+                stem, request = audio_request(track, metadata_provider(entry["url"]), service, quality, folder, ".flac")
+                jobs.append((track, fmt, folder, stem, request))
+            engine.batch_items = {job[4]["item_id"]: number for number, job in enumerate(jobs)}
+            engine.lib.mornye_subscribe(10)
+
+            def download(numbers):
+                pending = {engine.submit(method, json.dumps(jobs[number][4])): number for number in numbers}
+                deadline = time.monotonic() + 180
+                replies = {}
+                while pending:
+                    try:
+                        call_id, kind, data = engine.wait_for_reply(pending, deadline, method)
+                    except EngineRequestError as error:
+                        replies.update((number, {"error_type": "timeout"}) for number in pending.values())
+                        print(error, flush=True)
+                        break
+                    number = pending.pop(call_id)
+                    try:
+                        replies[number] = engine.decode_reply(kind, data, method)
+                    except (EngineRequestError, ValueError) as error:
+                        replies[number] = {"error_type": str(error)}
+                return replies
+
+            print("Searching Tidal for two tracks", flush=True)
+            replies = download(range(len(jobs)))
+            waiting = sorted(number for number, result in replies.items()
+                             if isinstance(result, dict) and result.get("error_type") == "verification_required")
+            if waiting:
+                verified = False
+                try:
+                    complete_browser_verification(engine, service, True)
+                    retry = download(waiting)
+                    replies.update(retry)
+                    verified = all(isinstance(result, dict) and result.get("error_type") != "verification_required"
+                                   for result in retry.values())
+                except (OSError, RuntimeError, ValueError) as error:
+                    replies.update((number, {"error_type": str(error)}) for number in waiting)
+                finally:
+                    print("YTDL_VERIFICATION_RESULT " + json.dumps(verified), flush=True)
+
+            engine.batch_items = {}
+            for number, (track, fmt, folder, stem, _) in enumerate(jobs):
+                try:
+                    path = finish_audio(replies[number], track, "Tidal", fmt, folder, destination,
+                                        True, stem, ".flac", False, False)
+                    status = {"file": str(path)}
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    status = {"error": str(error)}
+                print("YTDL_BATCH_RESULT " + json.dumps([number, status]), flush=True)
+
+
+def download_track(engine, track, provider, service, audio_format, output, destination_folder, gui):
+    _, quality, label = DOWNLOADERS[service]
+    engine.call("setDownloadDirectory", {"path": str(output)})
+    dolby = DOLBY_FORMATS.get(audio_format)
+    compressed = service in {"ytmusic-spotiflac", "jiosaavn"} or (service == "beatport" and audio_format == "M4A")
+    if compressed and audio_format not in {"M4A", "MP3"}:
+        raise RuntimeError("Choose M4A or MP3 for this source.")
+    if compressed and service == "beatport":
+        quality = "HIGH"
+    extension = ".m4a" if compressed else ".flac"
+    if audio_format == "FLAC-CD":
+        quality = "LOSSLESS"
+    if dolby:
+        _, quality, extension, _ = dolby
+    print(f"Searching {label} ({audio_format}) for {track['artists']} — {track['name']}", flush=True)
+    print(f"Audio request: source={service} · quality={quality} · extension={extension}", flush=True)
+    stem, request = audio_request(track, provider, service, quality, output, extension)
     if gui:
         engine.progress_item = request["item_id"]
         engine.lib.mornye_subscribe(10)
@@ -660,6 +758,15 @@ def download_track(engine, track, provider, service, audio_format, output, desti
     result = request_audio()
     if isinstance(result, dict) and result.get("error_type") == "verification_required":
         result = verify(engine, service, gui, request_audio)
+    path = finish_audio(result, track, label, audio_format, output, destination_folder, gui,
+                        stem, extension, compressed, dolby)
+    if gui:
+        print("YTDL_FILE " + json.dumps(str(path)))
+
+
+def finish_audio(result, track, label, audio_format, output, destination_folder, gui,
+                 stem, extension, compressed, dolby):
+    format_label = DOLBY_LABELS.get(audio_format, audio_format)
     if not isinstance(result, dict) or result.get("success") is not True:
         reason = result.get("error_type", "unknown") if isinstance(result, dict) else "invalid response"
         error_type = AudioUnavailable if isinstance(reason, str) and reason in UNAVAILABLE_ERRORS | PROVIDER_ERRORS else RuntimeError
@@ -683,7 +790,7 @@ def download_track(engine, track, provider, service, audio_format, output, desti
     descriptor = result.get("decryption")
     if dolby:
         try:
-            path = finalize_dolby(path, descriptor, extension, expected_codec)
+            path = finalize_dolby(path, descriptor, extension, dolby[3])
         except AudioUnavailable as error:
             raise AudioUnavailable(f"{label}: track not found in {DOLBY_LABELS[audio_format]}. {error}") from error
     elif compressed:
@@ -725,7 +832,7 @@ def download_track(engine, track, provider, service, audio_format, output, desti
                 continue
             break
         log_audio_file("Saved audio", destination)
-        print("YTDL_FILE " + json.dumps(str(destination)))
+        return destination
     else:
         if isinstance(descriptor, dict) and descriptor.get("key") and original != path:
             original.unlink()
@@ -765,6 +872,7 @@ if __name__ == "__main__":
     parser.add_argument("--format", choices=("FLAC", "FLAC-CD", "M4A", "MP3", *DOLBY_FORMATS), default="FLAC")
     parser.add_argument("--track-json", help=argparse.SUPPRESS)
     parser.add_argument("--maintenance", choices=("check", "reinstall"), help=argparse.SUPPRESS)
+    parser.add_argument("--batch", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.output.exists() and not args.gui:
         parser.error("Choose a new output directory so the test cannot match an old file.")
@@ -772,7 +880,9 @@ if __name__ == "__main__":
         os.umask(0o077)
         home = Path.home() / "Library/Application Support/YTDL/Music Preview"
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if args.maintenance:
+        if args.batch:
+            download_batch(args, home)
+        elif args.maintenance:
             maintain_metadata_extensions(args, home)
         elif args.gui:
             folder = home if args.inspect else args.output.resolve()

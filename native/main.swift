@@ -13,6 +13,7 @@ private final class Download {
     var music = false
     var musicTrackJSON: String?
     var inspectingMusic = false
+    var musicBatchInterrupted = false
     var musicCollection: UUID?
     var playlistTitle: String?
     var musicFormat = "FLAC"
@@ -1709,7 +1710,12 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.scheduled = false
         item.status = "Paused"
         item.progress = nil
-        if !item.inspectingMusic, let process = item.process, process.isRunning { process.terminate() }
+        if !item.inspectingMusic, let process = item.process, process.isRunning {
+            for peer in downloads where peer !== item && peer.process === process {
+                peer.musicBatchInterrupted = true
+            }
+            process.terminate()
+        }
     }
 
     @objc private func openFolder() { NSWorkspace.shared.open(outputFolder(for: "video_folder")) }
@@ -1812,6 +1818,15 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         for item in downloads where item.scheduled && !item.pendingRemoval && item.process == nil {
             guard remaining > 0 else { break }
             if item.music && musicActive { continue }
+            if remaining >= 2, canPairTidal(item),
+               let peer = downloads.first(where: {
+                   $0 !== item && $0.scheduled && !$0.pendingRemoval && $0.process == nil
+                       && canPairTidal($0) && downloadFolder(for: $0, audio: true) == downloadFolder(for: item, audio: true)
+               }), beginTidalPair(item, peer) {
+                musicActive = true
+                remaining -= 2
+                continue
+            }
             begin(item)
             if item.music { musicActive = item.process != nil }
             if item.process != nil { remaining -= 1 }
@@ -1955,20 +1970,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             }
         }, finish: { [weak self, weak item] code, message in
             guard let self = self, let item = item else { return }
-            item.process = nil
-            item.progress = nil
-            if item.pendingRemoval {
-                self.delete(item, trashFile: false)
-            } else if item.status != "Paused" || !item.files.isEmpty {
-                item.done = code == 0 && !item.files.isEmpty
-                item.status = item.done ? "Done" : "Error"
-                item.lastError = item.done ? "" : message
-                self.appendLog("Music · " + item.status + " · " + item.title)
-                if !item.done { self.unlockMusicOptions(item) }
-                if !item.done { self.setFooterStatus(item.lastError, error: true) }
-                self.notify(item.done ? "Download completed" : "Download failed", body: item.title,
-                            setting: item.done ? "notify_completed" : "notify_failed", enabledByDefault: true)
-            }
+            self.finishMusic(item, code: code, message: message)
             self.dispatch()
             if item.done { self.finishQueueIfNeeded(last: item) }
         })
@@ -1979,6 +1981,90 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             setFooterStatus("Could not launch the music engine.", error: true)
         } else {
             notify("Download started", body: item.title, setting: "notify_started")
+        }
+    }
+
+    private func canPairTidal(_ item: Download) -> Bool {
+        item.music && explicitMusicSource(for: item) == "tidal-web" && item.musicTrackJSON != nil
+            && ["FLAC", "FLAC-CD"].contains(item.startedMode ?? item.musicFormat)
+    }
+
+    private func beginTidalPair(_ first: Download, _ second: Download) -> Bool {
+        let items = [first, second]
+        let entries = items.map { ["url": $0.url, "track": $0.musicTrackJSON ?? "",
+                                   "format": $0.startedMode ?? $0.musicFormat] }
+        guard let payload = try? JSONSerialization.data(withJSONObject: entries) else { return false }
+        var results: [Int: [String: String]] = [:]
+        let process = musicPreview.run(link: first.url, folder: downloadFolder(for: first, audio: true),
+                                       source: "tidal-web", format: first.startedMode ?? first.musicFormat,
+                                       batch: String(decoding: payload, as: UTF8.self),
+                                       status: { [weak self] message in self?.setFooterStatus(message) },
+                                       log: { [weak self] message in self?.appendLog("Music · " + message) },
+                                       event: { [weak self] kind, data in
+            guard let self = self else { return }
+            if kind == "YTDL_VERIFICATION_RESULT" {
+                self.showVerificationResult(data)
+                return
+            }
+            guard let fields = (try? JSONSerialization.jsonObject(with: data)) as? [Any],
+                  fields.count == 2, let index = fields[0] as? Int, items.indices.contains(index) else { return }
+            let item = items[index]
+            if kind == "YTDL_BATCH_PROGRESS", item.status != "Paused", let progress = fields[1] as? Double {
+                item.progress = progress
+                item.status = "Downloading"
+                self.refreshStatus(for: item)
+            } else if kind == "YTDL_BATCH_RESULT", let result = fields[1] as? [String: String] {
+                results[index] = result
+            }
+        }, finish: { [weak self] code, message in
+            guard let self = self else { return }
+            for (index, item) in items.enumerated() {
+                let result = results[index]
+                if let file = result?["file"] { item.files = [URL(fileURLWithPath: file)] }
+                let interrupted = item.musicBatchInterrupted
+                item.musicBatchInterrupted = false
+                if interrupted && item.status != "Paused" && result == nil && !item.pendingRemoval {
+                    item.process = nil
+                    item.progress = nil
+                    item.status = "Waiting"
+                    item.scheduled = true
+                } else {
+                    self.finishMusic(item, code: result?["file"] != nil ? 0 : (code == 0 ? 1 : code),
+                                     message: result?["error"] ?? message)
+                }
+            }
+            self.dispatch()
+            if let last = items.last(where: { $0.done }) { self.finishQueueIfNeeded(last: last) }
+        })
+        guard let process = process else { return false }
+        for item in items {
+            item.process = process
+            item.startedMode = item.startedMode ?? item.musicFormat
+            item.scheduled = false
+            item.status = "Connecting…"
+            item.progress = nil
+            item.lastError = ""
+            notify("Download started", body: item.title, setting: "notify_started")
+        }
+        return true
+    }
+
+    private func finishMusic(_ item: Download, code: Int32, message: String) {
+        item.process = nil
+        item.progress = nil
+        if item.pendingRemoval {
+            delete(item, trashFile: false)
+        } else if item.status != "Paused" || !item.files.isEmpty {
+            item.done = code == 0 && !item.files.isEmpty
+            item.status = item.done ? "Done" : "Error"
+            item.lastError = item.done ? "" : message
+            appendLog("Music · " + item.status + " · " + item.title)
+            if !item.done {
+                unlockMusicOptions(item)
+                setFooterStatus(item.lastError, error: true)
+            }
+            notify(item.done ? "Download completed" : "Download failed", body: item.title,
+                   setting: item.done ? "notify_completed" : "notify_failed", enabledByDefault: true)
         }
     }
 
