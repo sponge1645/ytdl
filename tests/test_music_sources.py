@@ -71,9 +71,9 @@ class MusicSourceTests(unittest.TestCase):
         finish = Mock(side_effect=lambda reply, *args: f"/out/{reply['track']}.flac")
         install = Mock()
         entries = [
-            {"url": "https://open.spotify.com/album/example", "format": "FLAC",
+            {"url": "https://open.spotify.com/album/example", "format": fmt,
              "track": json.dumps({"name": f"Song {i}", "artists": "Artist", "playlist_index": i + 1})}
-            for i in range(2)
+            for i, fmt in enumerate(("MP3", "M4A"))
         ]
         with tempfile.TemporaryDirectory() as folder, patch.dict(RUN.__globals__, {
             "open_music_engine": lambda *args: nullcontext(engine),
@@ -86,8 +86,10 @@ class MusicSourceTests(unittest.TestCase):
         verify.assert_called_once_with(engine, "tidal-web", True)
         install.assert_called_once_with(engine, root, "tidal-web")
         self.assertEqual([call.args[0]["track"] for call in finish.call_args_list], [0, 1])
+        self.assertEqual([call.args[3] for call in finish.call_args_list], ["MP3", "M4A"])
         submissions = [call.args[1] for call in engine.submit.call_args_list]
         self.assertEqual(submissions[:2], submissions[2:])
+        self.assertTrue(all(json.loads(value)["output_ext"] == ".flac" for value in submissions))
         self.assertNotEqual(json.loads(submissions[0])["output_path"],
                             json.loads(submissions[1])["output_path"])
         self.assertIn('YTDL_BATCH_RESULT [1, {"file": "/out/1.flac"}]', out.getvalue())

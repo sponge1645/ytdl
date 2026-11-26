@@ -1997,7 +1997,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func canPairTidal(_ item: Download) -> Bool {
         item.music && explicitMusicSource(for: item) == "tidal-web" && item.musicTrackJSON != nil
-            && ["FLAC", "FLAC-CD"].contains(item.startedMode ?? item.musicFormat)
+            && ["FLAC", "FLAC-CD", "MP3", "M4A"].contains(item.startedMode ?? item.musicFormat)
     }
 
     private func beginTidalPair(_ first: Download, _ second: Download) -> Bool {
