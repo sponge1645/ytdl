@@ -323,8 +323,13 @@ def resolve_collection(engine, url):
             tracks.append(metadata)
     if not tracks:
         raise RuntimeError("No available music tracks were returned for this link.")
-    title = (collection.get("name") or collection.get("title") or collection.get("playlist_name")
-             or result.get("title") or result.get("name")) if kind == "playlist" else None
+    title = None
+    if kind in {"playlist", "album"}:
+        candidates = (collection.get("name"), collection.get("title"), collection.get(f"{kind}_name"),
+                      result.get("title"), result.get("name"))
+        if kind == "album":
+            candidates += (tracks[0].get("album_name"),)
+        title = next((value.strip() for value in candidates if isinstance(value, str) and value.strip()), None)
     return kind, tracks, len(entries) - len(tracks), title
 
 
@@ -600,7 +605,7 @@ def run(args, home):
         else:
             kind, tracks, skipped, title = resolve_music_link(engine, args.url, provider, args.gui)
             if args.inspect:
-                print("YTDL_METADATA " + json.dumps({"kind": kind, "tracks": tracks, "skipped": skipped, "playlist_title": title}))
+                print("YTDL_METADATA " + json.dumps({"kind": kind, "tracks": tracks, "skipped": skipped, "collection_title": title}))
                 return
             if kind != "track":
                 raise RuntimeError("Add the album or playlist to the app queue to download its tracks.")

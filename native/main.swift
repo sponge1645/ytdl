@@ -15,7 +15,8 @@ private final class Download {
     var inspectingMusic = false
     var musicBatchInterrupted = false
     var musicCollection: UUID?
-    var playlistTitle: String?
+    var collectionTitle: String?
+    var numberedPlaylist = false
     var musicFormat = "FLAC"
     var musicSource = 0
     var status = "Waiting"
@@ -290,6 +291,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let edit = NSMenuItem()
         let editMenu = NSMenu(title: localized("Edit"))
         editMenu.addItem(withTitle: localized("Copy"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: localized("Select All"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.submenu = editMenu
         let windowMenu = NSMenu(title: localized("Window"))
         windowMenu.addItem(withTitle: localized("Show Log"), action: #selector(showLog), keyEquivalent: "l").target = self
@@ -1387,7 +1389,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     let added = items.map { Download($0) }
                     for (info, item) in zip(items, added) {
                         item.thumbnailURL = Self.thumbnailURL(info["thumbnail"])
-                        item.playlistTitle = info["playlist_title"] as? String
+                        item.collectionTitle = info["playlist_title"] as? String
                     }
                     self.downloads.append(contentsOf: added)
                     if let first = added.first {
@@ -1447,8 +1449,15 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 self.delete(item, trashFile: false)
             } else if code == 0, let info = metadata,
                       let tracks = info["tracks"] as? [[String: Any]], !tracks.isEmpty {
-                self.expandMusic(item, tracks: tracks, collection: info["kind"] as? String != "track",
-                                 playlist: info["kind"] as? String == "playlist" ? (info["playlist_title"] as? String ?? localized("Playlist")) : nil,
+                let kind = info["kind"] as? String
+                let folderTitle: String?
+                switch kind {
+                case "playlist": folderTitle = info["collection_title"] as? String ?? localized("Playlist")
+                case "album": folderTitle = info["collection_title"] as? String ?? localized("Album")
+                default: folderTitle = nil
+                }
+                self.expandMusic(item, tracks: tracks, collection: kind != "track",
+                                 folderTitle: folderTitle, numberFiles: kind == "playlist",
                                  skipped: info["skipped"] as? Int ?? 0)
             } else if item.status != "Paused" {
                 item.lastError = message.isEmpty ? localized("Could not read music tracks.") : message
@@ -1467,21 +1476,22 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         refresh()
     }
 
-    private func expandMusic(_ item: Download, tracks: [[String: Any]], collection: Bool, playlist: String?, skipped: Int) {
+    private func expandMusic(_ item: Download, tracks: [[String: Any]], collection: Bool, folderTitle: String?, numberFiles: Bool, skipped: Int) {
         guard let index = downloads.firstIndex(where: { $0 === item }) else { return }
         let autoDownload = NativePreferences.read()["auto"] as? Bool == true
         let added = tracks.enumerated().compactMap { offset, track -> Download? in
             guard let name = track["name"] as? String, let artist = track["artists"] as? String,
                   !name.isEmpty, !artist.isEmpty else { return nil }
             var metadata = track
-            if playlist != nil { metadata["playlist_index"] = offset + 1 }
+            if numberFiles { metadata["playlist_index"] = offset + 1 }
             guard let encoded = try? JSONSerialization.data(withJSONObject: metadata) else { return nil }
             let row = collection ? Download(["url": item.url, "index": offset + 1]) : item
             row.title = "\(artist) — \(name)"
             row.music = true
             row.musicTrackJSON = String(decoding: encoded, as: UTF8.self)
             row.musicCollection = collection ? item.id : nil
-            row.playlistTitle = playlist
+            row.collectionTitle = folderTitle
+            row.numberedPlaylist = numberFiles
             row.musicSource = item.musicSource
             row.musicFormat = item.musicFormat
             row.status = item.status
@@ -1690,6 +1700,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
         title.stringValue = localized(showCompleted ? "Completed" : "Queue")
         refresh()
+        window.makeFirstResponder(table)
     }
 
     @objc private func startAll() {
@@ -1928,12 +1939,12 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func downloadFolder(for item: Download, audio: Bool) -> URL {
         let folder = outputFolder(for: audio ? "audio_folder" : "video_folder")
-        guard let title = item.playlistTitle else { return folder }
+        guard let title = item.collectionTitle else { return folder }
         let invalidCharacters = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/:"))
         let name = title.components(separatedBy: invalidCharacters).joined(separator: " ")
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
         let shortened = String(decoding: name.utf8.prefix(180), as: UTF8.self)
-        return folder.appendingPathComponent(shortened.isEmpty ? localized("Playlist") : shortened, isDirectory: true)
+        return folder.appendingPathComponent(shortened.isEmpty ? localized(item.musicTrackJSON != nil && !item.numberedPlaylist ? "Album" : "Playlist") : shortened, isDirectory: true)
     }
 
     private func showVerificationResult(_ data: Data) {

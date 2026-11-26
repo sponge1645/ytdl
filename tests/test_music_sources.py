@@ -25,6 +25,17 @@ class MusicSourceTests(unittest.TestCase):
         self.assertEqual((kind, skipped, title), ("playlist", 1, "My Mix"))
         self.assertEqual([track["name"] for track in tracks], ["Song"])
 
+    def test_music_album_uses_album_title_for_collection(self):
+        resolve = RUN.__globals__["resolve_collection"]
+        engine = Mock()
+        track = {"name": "Song", "artists": "Artist", "album_name": "Track Album"}
+        for album, title in [({"title": "Album from provider"}, "Album from provider"), ({}, "Track Album")]:
+            with self.subTest(album=album):
+                engine.call.return_value = {"type": "album", "album": album, "tracks": [track]}
+                kind, tracks, skipped, collection_title = resolve(engine, "https://music.apple.com/album/example")
+                self.assertEqual((kind, skipped, collection_title), ("album", 0, title))
+                self.assertEqual(tracks[0]["name"], "Song")
+
     def test_verification_reports_repeated_challenge_as_failure(self):
         verify = RUN.__globals__["verify"]
         for result, expected in [({"success": True}, "true"), ({"error_type": "verification_required"}, "false")]:
