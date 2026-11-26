@@ -673,10 +673,6 @@ def audio_settings(service, audio_format):
 
 def download_batch(args, home):
     method = "downloadByStrategy"
-    service = args.source
-    if service not in DOWNLOADERS:
-        raise ValueError("Choose a music source for parallel downloads.")
-    package, _, label = DOWNLOADERS[service]
     batch = json.loads(args.batch)
     if not isinstance(batch, list) or len(batch) != 2:
         raise ValueError("Expected two music tracks.")
@@ -687,27 +683,24 @@ def download_batch(args, home):
         output = Path(directory)
         with open_music_engine(library, home, output) as engine:
             engine.call("loadExtensionsFromDir", {"dir_path": str(home / "extensions")})
-            install_package(engine, home, package)
             engine.call("setDownloadDirectory", {"path": str(output)})
-            jobs = []
+            tracks = {}
+            attempts = {}
+            failures = {}
             for number, entry in enumerate(batch):
                 track = track_metadata(json.loads(entry["track"]))
                 if not track:
                     raise ValueError("Invalid queued track metadata.")
                 track["source_comment"] = source_comment(entry["url"])
-                fmt = entry["format"]
                 provider = metadata_provider(entry["url"])
-                download_source(provider, service, fmt)
-                quality, extension, compressed, dolby = audio_settings(service, fmt)
-                folder = output / str(number)
-                folder.mkdir()
-                stem, request = audio_request(track, provider, service, quality, folder, extension)
-                jobs.append((track, fmt, folder, stem, request, extension, compressed, dolby))
-            engine.batch_items = {job[4]["item_id"]: number for number, job in enumerate(jobs)}
+                tracks[number] = track, provider
+                attempts[number] = iter(download_attempts(provider, args.source, entry["format"]))
+                failures[number] = []
             engine.lib.mornye_subscribe(10)
+            installed = set()
 
-            def download(numbers):
-                pending = {engine.submit(method, json.dumps(jobs[number][4])): number for number in numbers}
+            def download(requests):
+                pending = {engine.submit(method, json.dumps(request)): number for number, request in requests.items()}
                 deadline = time.monotonic() + 180
                 replies = {}
                 while pending:
@@ -721,35 +714,66 @@ def download_batch(args, home):
                     try:
                         replies[number] = engine.decode_reply(kind, data, method)
                     except (EngineRequestError, ValueError) as error:
-                        replies[number] = {"error_type": str(error)}
+                        replies[number] = {"error_type": "api_error" if isinstance(error, EngineRequestError) else "invalid response"}
+                        print(error, flush=True)
                 return replies
 
-            print(f"Searching {label} for two tracks", flush=True)
-            replies = download(range(len(jobs)))
-            waiting = sorted(number for number, result in replies.items()
-                             if isinstance(result, dict) and result.get("error_type") == "verification_required")
-            if waiting:
-                verified = False
-                try:
-                    complete_browser_verification(engine, service, True)
-                    retry = download(waiting)
-                    replies.update(retry)
-                    verified = all(isinstance(result, dict) and result.get("error_type") != "verification_required"
-                                   for result in retry.values())
-                except (OSError, RuntimeError, ValueError) as error:
-                    replies.update((number, {"error_type": str(error)}) for number in waiting)
-                finally:
-                    print("YTDL_VERIFICATION_RESULT " + json.dumps(verified), flush=True)
+            while attempts:
+                jobs = {}
+                for number, plan in list(attempts.items()):
+                    candidate = next(plan, None)
+                    if candidate is None:
+                        print("YTDL_BATCH_RESULT " + json.dumps(
+                            [number, {"error": " ".join(failures[number])}]), flush=True)
+                        del attempts[number]
+                        continue
+                    service, fmt = candidate
+                    package, _, label = DOWNLOADERS[service]
+                    if package not in installed:
+                        install_package(engine, home, package)
+                        installed.add(package)
+                    track, provider = tracks[number]
+                    quality, extension, compressed, dolby = audio_settings(service, fmt)
+                    folder = Path(tempfile.mkdtemp(prefix=f"{number}-", dir=output))
+                    stem, request = audio_request(track, provider, service, quality, folder, extension)
+                    jobs[number] = service, label, fmt, folder, stem, request, extension, compressed, dolby
+                    print(f"Searching {label} ({fmt}) for {track['artists']} — {track['name']}", flush=True)
 
-            engine.batch_items = {}
-            for number, (track, fmt, folder, stem, _, extension, compressed, dolby) in enumerate(jobs):
-                try:
-                    path = finish_audio(replies[number], track, label, fmt, folder, destination,
-                                        True, stem, extension, compressed, dolby)
-                    status = {"file": str(path)}
-                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-                    status = {"error": str(error)}
-                print("YTDL_BATCH_RESULT " + json.dumps([number, status]), flush=True)
+                requests = {number: job[5] for number, job in jobs.items()}
+                engine.batch_items = {request["item_id"]: number for number, request in requests.items()}
+                replies = download(requests)
+                challenges = {}
+                for number, result in sorted(replies.items()):
+                    if isinstance(result, dict) and result.get("error_type") == "verification_required":
+                        challenges.setdefault(jobs[number][0], {})[number] = requests[number]
+                for service, waiting in challenges.items():
+                    verified = False
+                    try:
+                        complete_browser_verification(engine, service, True)
+                        retry = download(waiting)
+                        replies.update(retry)
+                        verified = all(isinstance(result, dict) and result.get("error_type") != "verification_required"
+                                       for result in retry.values())
+                    except (OSError, RuntimeError, ValueError) as error:
+                        replies.update((number, {"error_type": str(error)}) for number in waiting)
+                    finally:
+                        print("YTDL_VERIFICATION_RESULT " + json.dumps(verified), flush=True)
+
+                engine.batch_items = {}
+                for number, (_, label, fmt, folder, stem, _, extension, compressed, dolby) in jobs.items():
+                    track, _ = tracks[number]
+                    try:
+                        path = finish_audio(replies[number], track, label, fmt, folder, destination,
+                                            True, stem, extension, compressed, dolby)
+                        status = {"file": str(path)}
+                    except AudioUnavailable as error:
+                        failures[number].append(str(error))
+                        print(error, flush=True)
+                        continue
+                    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                        status = {"error": str(error)}
+                    del attempts[number]
+                    print("YTDL_BATCH_RESULT " + json.dumps([number, status]), flush=True)
 
 
 def download_track(engine, track, provider, service, audio_format, output, destination_folder, gui):

@@ -94,6 +94,36 @@ class MusicSourceTests(unittest.TestCase):
                             json.loads(submissions[1])["output_path"])
         self.assertIn('YTDL_BATCH_RESULT [1, {"file": "/out/1.flac"}]', out.getvalue())
 
+    def test_automatic_batch_retries_only_the_track_that_failed(self):
+        download = RUN.__globals__["download_batch"]
+        engine = Mock()
+        engine.submit.side_effect = [1, 2, 3]
+        engine.wait_for_reply.side_effect = [(2, 0, b""), (1, 0, b""), (3, 0, b"")]
+        engine.decode_reply.side_effect = [{"success": True}, {"error_type": "timeout"}, {"success": True}]
+        entries = [
+            {"url": "https://open.spotify.com/album/example", "format": "MP3",
+             "track": json.dumps({"name": f"Song {i}", "artists": "Artist"})}
+            for i in range(2)
+        ]
+        unavailable = RUN.__globals__["AudioUnavailable"]
+
+        def finish(reply, track, *args):
+            if not reply.get("success"):
+                raise unavailable("Amazon timed out.")
+            return f"/out/{track['name']}.mp3"
+
+        with tempfile.TemporaryDirectory() as folder, patch.dict(RUN.__globals__, {
+            "open_music_engine": lambda *args: nullcontext(engine),
+            "install_package": Mock(),
+            "finish_audio": finish,
+        }), redirect_stdout(StringIO()) as out:
+            root = Path(folder)
+            download(SimpleNamespace(app=root, output=root / "out", source=None, batch=json.dumps(entries)), root)
+        requests = [json.loads(call.args[1]) for call in engine.submit.call_args_list]
+        self.assertEqual([(req["service"], req["track_name"]) for req in requests],
+                         [("amazon", "Song 0"), ("amazon", "Song 1"), ("ytmusic-spotiflac", "Song 0")])
+        self.assertEqual(out.getvalue().count("YTDL_BATCH_RESULT"), 2)
+
     def test_media_tools_use_active_architecture_kit(self):
         media_tool = RUN.__globals__["media_tool"]
         with tempfile.TemporaryDirectory() as folder:

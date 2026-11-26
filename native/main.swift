@@ -1825,7 +1825,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         for item in downloads where item.scheduled && !item.pendingRemoval && item.process == nil {
             guard remaining > 0 else { break }
             if item.music && musicActive { continue }
-            if remaining >= 2, item.musicTrackJSON != nil, let source = explicitMusicSource(for: item),
+            let source = explicitMusicSource(for: item)
+            if remaining >= 2, item.musicTrackJSON != nil,
                let peer = downloads.first(where: {
                    $0 !== item && $0.scheduled && !$0.pendingRemoval && $0.process == nil
                        && $0.musicTrackJSON != nil && explicitMusicSource(for: $0) == source
@@ -1992,7 +1993,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
     }
 
-    private func beginMusicPair(_ first: Download, _ second: Download, source: String) -> Bool {
+    private func beginMusicPair(_ first: Download, _ second: Download, source: String?) -> Bool {
         let items = [first, second]
         let entries = items.map { ["url": $0.url, "track": $0.musicTrackJSON ?? "",
                                    "format": $0.startedMode ?? $0.musicFormat] }
