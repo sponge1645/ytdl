@@ -1510,7 +1510,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     private func pendingMusicGroup(for item: Download) -> [Download] {
         guard let group = item.musicCollection else { return [item] }
-        return downloads.filter { $0.musicCollection == group && $0.startedMode == nil }
+        return downloads.filter { $0.musicCollection == group && !$0.done && !$0.pendingRemoval && $0.startedMode == nil }
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -1533,6 +1533,8 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             $0.music && !$0.done && !$0.pendingRemoval
         }
         if resetSharedFormat { sharedAudioFormat = nil }
+        quality.isEnabled = item?.startedMode == nil
+        musicSource.isEnabled = item?.startedMode == nil
         if let item = item {
             guard musicSelection !== item else { return }
         } else if mode.isEnabled && !resetSharedFormat {
@@ -1546,8 +1548,6 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         musicSource.isHidden = item == nil
         qualityWidth?.constant = item == nil ? 160 : 228
         mode.isEnabled = item == nil
-        quality.isEnabled = item?.startedMode == nil
-        musicSource.isEnabled = item?.startedMode == nil
         if let item = item {
             mode.selectedSegment = 1
             musicSource.selectItem(at: item.musicSource)
@@ -1673,13 +1673,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.retry = nil
         item.retryCount = 0
         item.didRetryYouTubeSession = false
-        item.startedMode = item.startedMode ?? (item.music ? item.musicFormat : regularFormat)
+        if !item.music { item.startedMode = item.startedMode ?? regularFormat }
         item.status = "Waiting"
         item.scheduled = true
-        if musicSelection === item {
-            quality.isEnabled = false
-            musicSource.isEnabled = false
-        }
     }
 
     @objc private func selectQueue() {
@@ -2037,6 +2033,7 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 if interrupted && item.status != "Paused" && result == nil && !item.pendingRemoval {
                     item.process = nil
                     item.progress = nil
+                    self.unlockMusicOptions(item)
                     item.status = "Waiting"
                     item.scheduled = true
                 } else {
@@ -2065,7 +2062,9 @@ private final class App: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         item.progress = nil
         if item.pendingRemoval {
             delete(item, trashFile: false)
-        } else if item.status != "Paused" || !item.files.isEmpty {
+        } else if item.status == "Paused" && item.files.isEmpty {
+            unlockMusicOptions(item)
+        } else {
             item.done = code == 0 && !item.files.isEmpty
             item.status = item.done ? "Done" : "Error"
             item.lastError = item.done ? "" : message
